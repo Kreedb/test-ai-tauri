@@ -9,6 +9,7 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
 const request = {
   host: 'localhost', port: 22, username: 'test', password: 'test-only',
   hostKeySha256: `SHA256:${'A'.repeat(43)}`,
+  ignoreHostKey: false,
 };
 const size = { cols: 80, rows: 24 };
 
@@ -39,6 +40,14 @@ describe('platform transports', () => {
     await connection.disconnect();
     expect(invoke).toHaveBeenCalledWith('ssh_resize', { sessionId: 7, size });
     expect(invoke).toHaveBeenCalledWith('ssh_disconnect', { sessionId: 7 });
+  });
+
+  it('forwards explicit host-key bypass without requiring a fingerprint', async () => {
+    vi.mocked(invoke).mockResolvedValue(null);
+    const unverified = { ...request, hostKeySha256: '', ignoreHostKey: true };
+    const connection = await tauriTransport.connect(unverified, size, () => {});
+    expect(invoke).toHaveBeenCalledWith('ssh_connect', { request: unverified, size });
+    await connection.disconnect();
   });
 
   it('does not request more output until xterm has consumed the previous chunk', async () => {

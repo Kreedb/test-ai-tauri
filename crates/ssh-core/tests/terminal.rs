@@ -169,6 +169,7 @@ impl TestServer {
             username: "demo".into(),
             password: "test-only".into(),
             host_key_sha256: self.fingerprint.clone(),
+            ignore_host_key: false,
         }
     }
 }
@@ -251,6 +252,25 @@ async fn rejects_host_key_before_sending_password() {
     request.host_key_sha256 = format!("SHA256:{}", "A".repeat(43));
     assert!(service.connect(request, SIZE).await.is_err());
     assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn connects_without_a_trusted_fingerprint_only_with_explicit_opt_in() {
+    let server = TestServer::start(false).await;
+    let service = SshService::default();
+    let mismatched = format!("SHA256:{}", "A".repeat(43));
+    for fingerprint in ["", "SHA256:untrusted", &mismatched] {
+        let mut request = server.request();
+        request.host_key_sha256 = fingerprint.into();
+        assert!(service.connect(request, SIZE).await.is_err());
+        let mut request = server.request();
+        request.host_key_sha256 = fingerprint.into();
+        request.ignore_host_key = true;
+        let id = service.connect(request, SIZE).await.unwrap();
+        read_bytes(&service, id, b"ready\r\n").await;
+        service.disconnect(id).await.unwrap();
+    }
+    assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

@@ -25,7 +25,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web
           path: dist/
@@ -52,7 +52,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - run: npm run desktop:linux
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64
           path: target/release/bundle/deb/*.deb
@@ -76,20 +76,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows-msvc
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         with:
           path: .xwin-cache
           key: xwin-${{ runner.os }}-x86_64-0.23.1
       - name: Install cross-compilation prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld llvm nsis
+          sudo apt-get install -y --no-install-recommends clang lld llvm
           python3 -m pip install --user cargo-xwin==0.23.1
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run desktop:windows
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
-          name: windows-x86_64-msvc
-          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          path: target/x86_64-pc-windows-msvc/release/tauri-ssh-template.exe
+          archive: false
           if-no-files-found: error

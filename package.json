@@ -15,7 +15,7 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:linux": "tauri build --bundles deb -- --locked",
-    "desktop:windows": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --bundles nsis -- --locked"
+    "desktop:windows": "tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc --no-bundle -- --locked"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.11.1",

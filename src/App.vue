@@ -12,6 +12,7 @@ const form = reactive<ConnectionRequest>({
   username: '',
   password: '',
   hostKeySha256: '',
+  ignoreHostKey: false,
 });
 const session = createTerminalSession(terminalTransport, (data) => terminal.value?.write(data));
 const { phase, error } = session;
@@ -69,8 +70,13 @@ onBeforeUnmount(() => { void session.disconnect(); });
           <input id="password" v-model="form.password" required type="password" maxlength="16384" autocomplete="off" />
 
           <label for="fingerprint">主机指纹（SHA256）</label>
-          <input id="fingerprint" v-model.trim="form.hostKeySha256" required pattern="SHA256:[A-Za-z0-9+\/]{43}" placeholder="SHA256:…" autocomplete="off" aria-describedby="fingerprint-help" />
+          <input id="fingerprint" v-model.trim="form.hostKeySha256" :required="!form.ignoreHostKey" :disabled="form.ignoreHostKey" pattern="SHA256:[A-Za-z0-9+\/]{43}" placeholder="SHA256:…" autocomplete="off" aria-describedby="fingerprint-help" />
           <p id="fingerprint-help" class="muted">通过可信渠道向服务器管理员获取；指纹不匹配时会在发送密码前拒绝连接。</p>
+          <label for="ignore-host-key" class="checkbox">
+            <input id="ignore-host-key" v-model="form.ignoreHostKey" type="checkbox" aria-describedby="host-key-warning" />
+            忽略主机指纹（不安全）
+          </label>
+          <p id="host-key-warning" class="muted">忽略后无法确认服务器身份，可能遭中间人攻击并泄露密码；仅在可信网络临时使用。</p>
           <button type="submit">连接 SSH</button>
         </fieldset>
         <button v-if="phase === 'connected'" type="button" class="secondary" @click="session.disconnect">断开连接</button>

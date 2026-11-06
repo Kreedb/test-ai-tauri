@@ -5,6 +5,7 @@ import type { TerminalConnection, TerminalEvent, TerminalTransport } from '../do
 const request = {
   host: 'localhost', port: 22, username: 'test', password: 'test-only',
   hostKeySha256: `SHA256:${'A'.repeat(43)}`,
+  ignoreHostKey: false,
 };
 const size = { cols: 80, rows: 24 };
 const bytes = (data: string) => new TextEncoder().encode(data);

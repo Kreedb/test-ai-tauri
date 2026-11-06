@@ -4,6 +4,7 @@ export interface ConnectionRequest {
   username: string;
   password: string;
   hostKeySha256: string;
+  ignoreHostKey: boolean;
 }
 
 export interface TerminalSize {

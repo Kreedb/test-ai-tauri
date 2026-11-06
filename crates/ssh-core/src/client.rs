@@ -7,21 +7,25 @@ use russh::{
 
 use crate::{ConnectionRequest, TerminalEvent, TerminalSize};
 
-pub(crate) struct PinnedHostKey(String);
+pub(crate) struct HostKeyVerifier {
+    fingerprint: String,
+    ignore: bool,
+}
 
-impl client::Handler for PinnedHostKey {
+impl client::Handler for HostKeyVerifier {
     type Error = russh::Error;
 
     async fn check_server_key(
         &mut self,
         key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
-        Ok(key.public_key().fingerprint(HashAlg::Sha256).to_string() == self.0)
+        Ok(self.ignore
+            || key.public_key().fingerprint(HashAlg::Sha256).to_string() == self.fingerprint)
     }
 }
 
 pub(crate) struct ConnectedSsh {
-    pub session: client::Handle<PinnedHostKey>,
+    pub session: client::Handle<HostKeyVerifier>,
     pub channel: Channel<client::Msg>,
     pub early_output: VecDeque<TerminalEvent>,
 }
@@ -40,7 +44,10 @@ pub(crate) async fn connect(
     let mut session = client::connect(
         config,
         (request.host.as_str(), request.port),
-        PinnedHostKey(request.host_key_sha256.clone()),
+        HostKeyVerifier {
+            fingerprint: request.host_key_sha256.clone(),
+            ignore: request.ignore_host_key,
+        },
     )
     .await
     .map_err(|error| format!("SSH 握手失败，请核对地址和主机指纹：{error}"))?;

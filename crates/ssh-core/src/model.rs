@@ -8,6 +8,8 @@ pub struct ConnectionRequest {
     pub username: String,
     pub password: String,
     pub host_key_sha256: String,
+    #[serde(default)]
+    pub ignore_host_key: bool,
 }
 
 impl ConnectionRequest {
@@ -33,13 +35,15 @@ impl ConnectionRequest {
         if self.password.is_empty() || self.password.len() > 16384 {
             return Err("密码不能为空且不能超过 16384 字节");
         }
-        let hash = self.host_key_sha256.strip_prefix("SHA256:").unwrap_or("");
-        if hash.len() != 43
-            || !hash
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
-        {
-            return Err("请输入可信的 OpenSSH SHA256 主机指纹（SHA256: 后接 43 个字符）");
+        if !self.ignore_host_key {
+            let hash = self.host_key_sha256.strip_prefix("SHA256:").unwrap_or("");
+            if hash.len() != 43
+                || !hash
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'+' || c == b'/')
+            {
+                return Err("请输入可信的 OpenSSH SHA256 主机指纹（SHA256: 后接 43 个字符）");
+            }
         }
         Ok(())
     }
@@ -78,6 +82,7 @@ mod tests {
             username: "demo".into(),
             password: "test-only".into(),
             host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
+            ignore_host_key: false,
         }
     }
 
@@ -105,6 +110,19 @@ mod tests {
         assert!(input.validate().is_err());
         input = request();
         input.host_key_sha256 = "SHA256:untrusted".into();
+        assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn only_skips_fingerprint_validation_with_explicit_opt_in() {
+        let mut input = request();
+        input.host_key_sha256.clear();
+        assert!(input.validate().is_err());
+        input.ignore_host_key = true;
+        assert!(input.validate().is_ok());
+        input.host_key_sha256 = "invalid".into();
+        assert!(input.validate().is_ok());
+        input.password.clear();
         assert!(input.validate().is_err());
     }
 
