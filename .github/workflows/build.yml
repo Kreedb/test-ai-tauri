@@ -1,0 +1,95 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist/
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev build-essential pkg-config librsvg2-dev patchelf
+      - run: npm ci
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: npm run desktop:linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+  windows:
+    name: Windows MSVC via cargo-xwin (Linux host)
+    runs-on: ubuntu-24.04
+    env:
+      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
+      XWIN_ARCH: x86_64
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-msvc
+      - uses: actions/cache@v4
+        with:
+          path: .xwin-cache
+          key: xwin-${{ runner.os }}-x86_64-0.23.1
+      - name: Install cross-compilation prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm nsis
+          python3 -m pip install --user cargo-xwin==0.23.1
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: npm ci
+      - run: npm run desktop:windows
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-msvc
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
