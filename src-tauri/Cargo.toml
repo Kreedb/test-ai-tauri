@@ -1,0 +1,16 @@
+[package]
+name = "tauri-ssh-template"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "A minimal Tauri SSH terminal"
+
+[lib]
+name = "tauri_ssh_template_lib"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+ssh-core = { path = "../crates/ssh-core" }
+tauri = { version = "~2.11.6", features = [] }

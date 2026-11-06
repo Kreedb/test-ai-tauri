@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Only the local main window may use the SSH terminal commands.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "allow-ssh-connect",
+    "allow-ssh-read",
+    "allow-ssh-write",
+    "allow-ssh-resize",
+    "allow-ssh-disconnect"
+  ]
+}
