@@ -104,8 +104,12 @@ impl server::Handler for EchoServer {
             session.exit_status_request(channel, 0)?;
             session.data(channel, b"goodbye\r\n".to_vec())?;
             session.close(channel)?;
+        } else if data == b"drop\r" {
+            return Err(russh::Error::Disconnect);
         } else {
-            session.data(channel, data.to_vec())?;
+            for chunk in data.chunks(512) {
+                session.data(channel, chunk.to_vec())?;
+            }
         }
         Ok(())
     }
@@ -134,13 +138,21 @@ struct TestServer {
 
 impl TestServer {
     async fn start(reject_shell: bool) -> Self {
+        Self::start_with(reject_shell, None).await
+    }
+
+    async fn start_with(reject_shell: bool, window_size: Option<u32>) -> Self {
         let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
-        let config = Arc::new(server::Config {
+        let mut config = server::Config {
             keys: vec![key],
             auth_rejection_time: Duration::ZERO,
             ..Default::default()
-        });
+        };
+        if let Some(window_size) = window_size {
+            config.window_size = window_size;
+        }
+        let config = Arc::new(config);
         let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = socket.local_addr().unwrap().port();
         let (sizes_tx, sizes) = mpsc::unbounded_channel();
@@ -312,6 +324,40 @@ async fn delivers_final_output_before_remote_close() {
     ));
     let new_id = connect(&service, &server).await;
     service.disconnect(new_id).await.unwrap();
+}
+
+#[tokio::test]
+async fn reports_an_unexpected_connection_loss() {
+    let server = TestServer::start(false).await;
+    let service = SshService::default();
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    service.write(id, b"drop\r".to_vec()).await.unwrap();
+    assert!(matches!(
+        timeout(Duration::from_secs(5), service.read(id))
+            .await
+            .unwrap()
+            .unwrap(),
+        Some(TerminalEvent::Closed { error: Some(_) })
+    ));
+}
+
+#[tokio::test]
+async fn completes_a_paste_larger_than_the_server_window() {
+    let server = TestServer::start_with(false, Some(32 * 1024)).await;
+    let service = SshService::default();
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+
+    let paste = vec![b'p'; 48 * 1024];
+    let writer = async { service.write(id, paste.clone()).await.unwrap() };
+    let reader = async { read_bytes(&service, id, &paste).await };
+    timeout(Duration::from_secs(10), async {
+        tokio::join!(writer, reader);
+    })
+    .await
+    .expect("paste stalled");
+    service.disconnect(id).await.unwrap();
 }
 
 #[tokio::test]

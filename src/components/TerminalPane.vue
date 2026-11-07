@@ -41,7 +41,8 @@ onBeforeUnmount(() => {
 
 defineExpose({
   write: (data: Uint8Array) => new Promise<void>((resolve) => terminal.write(data, resolve)),
-  reset: () => terminal.reset(),
+  // CAN cancels an unfinished escape string, then RIS resets parser and screen.
+  reset: () => new Promise<void>((resolve) => terminal.write(Uint8Array.of(0x18, 0x1b, 0x63), resolve)),
   focus: () => terminal.focus(),
   size: (): TerminalSize => ({ cols: terminal.cols, rows: terminal.rows }),
 });

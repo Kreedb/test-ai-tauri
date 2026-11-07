@@ -24,14 +24,15 @@ const status = computed(() => ({
 })[phase.value]);
 
 async function connect() {
-  if (!terminal.value) return;
-  terminal.value.reset();
-  const connecting = session.connect({ ...form }, terminal.value.size());
+  const pane = terminal.value;
+  if (!pane) return;
+  await pane.reset();
+  const connecting = session.connect({ ...form }, pane.size());
   form.password = '';
   await connecting;
   if (phase.value === 'connected') {
-    await session.resize(terminal.value.size());
-    terminal.value.focus();
+    await session.resize(pane.size());
+    pane.focus();
   }
 }
 

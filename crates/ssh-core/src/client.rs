@@ -35,6 +35,9 @@ pub(crate) async fn connect(
     size: TerminalSize,
 ) -> Result<ConnectedSsh, String> {
     let config = Arc::new(client::Config {
+        // Reap handshakes that outlive the caller's 15s timeout; keepalives keep
+        // an authenticated idle session alive well below this limit.
+        inactivity_timeout: Some(Duration::from_secs(120)),
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
         // Keep the receive backlog short so terminal input is not queued behind many rendered chunks.
