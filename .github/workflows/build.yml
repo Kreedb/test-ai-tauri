@@ -64,6 +64,7 @@ jobs:
     env:
       XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
       XWIN_ARCH: x86_64
+      CARGO_XWIN_VERSION: "0.23.1"
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -75,17 +76,16 @@ jobs:
           targets: x86_64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
         with:
-          key: windows-msvc
+          key: windows-msvc-cargo-xwin-${{ env.CARGO_XWIN_VERSION }}
       - uses: actions/cache@v5
         with:
           path: .xwin-cache
-          key: xwin-${{ runner.os }}-x86_64-0.23.1
+          key: xwin-${{ runner.os }}-x86_64-${{ env.CARGO_XWIN_VERSION }}
       - name: Install cross-compilation prerequisites
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang lld llvm
-          python3 -m pip install --user cargo-xwin==0.23.1
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          cargo install --locked --version "$CARGO_XWIN_VERSION" cargo-xwin
       - run: npm ci
       - run: npm run desktop:windows
       - uses: actions/upload-artifact@v7
