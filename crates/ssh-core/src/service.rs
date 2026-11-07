@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use russh::{ChannelMsg, Disconnect};
+use russh::{ChannelMsg, ChannelWriteHalf, Disconnect};
 use tokio::{
     sync::{Mutex, mpsc, oneshot},
     task::JoinHandle,
@@ -20,6 +20,15 @@ use crate::{
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 type Reply = oneshot::Sender<Result<(), String>>;
+
+/// Keeps the writer task tied to the reader loop, including when `run` is aborted.
+struct AbortOnDrop<T>(JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 enum Control {
     Write(Vec<u8>, Reply),
@@ -143,51 +152,47 @@ impl SshService {
 async fn run(
     ConnectedSsh {
         session,
-        mut channel,
+        channel,
         mut early_output,
     }: ConnectedSsh,
-    mut controls: mpsc::Receiver<Control>,
+    controls: mpsc::Receiver<Control>,
     output: mpsc::Sender<TerminalEvent>,
 ) {
+    // Reads and writes run separately so a window-blocked write cannot stop us
+    // from draining output, which is what renews that window.
+    let (mut reader, writer) = channel.split();
+    let mut writer_task = AbortOnDrop(tokio::spawn(write_controls(writer, controls)));
     let mut pending = early_output.pop_front();
     let mut notify = true;
     let error = loop {
         tokio::select! {
-            control = controls.recv() => {
-                let (result, reply) = match control {
-                    Some(Control::Write(data, reply)) => {
-                        (timeout(IO_TIMEOUT, channel.data(&data[..])).await, reply)
-                    }
-                    Some(Control::Resize(size, reply)) => {
-                        (timeout(IO_TIMEOUT, channel.window_change(size.cols, size.rows, 0, 0)).await, reply)
-                    }
-                    Some(Control::Disconnect) | None => {
-                        notify = false;
-                        break None;
-                    }
-                };
-                let result = result.map_err(|_| "SSH 写入超时".to_string())
-                    .and_then(|result| result.map_err(|e| e.to_string()));
-                let failure = result.as_ref().err().cloned();
-                let _ = reply.send(result);
-                if failure.is_some() { break failure; }
-            }
             permit = output.reserve(), if pending.is_some() => {
                 let Ok(permit) = permit else { break None };
                 if let Some(event) = pending.take() { permit.send(event); }
                 pending = early_output.pop_front();
             }
-            message = channel.wait(), if pending.is_none() => match message {
+            finished = &mut writer_task.0 => {
+                break match finished {
+                    Ok(Ok(())) => {
+                        notify = false;
+                        None
+                    }
+                    Ok(Err(error)) => Some(error),
+                    Err(_) => Some("SSH 会话任务异常".into()),
+                };
+            }
+            message = reader.wait(), if pending.is_none() => match message {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
                     pending = Some(TerminalEvent::Data { data: data.to_vec() });
                 }
                 Some(ChannelMsg::Failure) => break Some("服务器拒绝终端请求".into()),
-                Some(ChannelMsg::Close) | None => break None,
+                Some(ChannelMsg::Close) => break None,
+                None => break Some("SSH 连接意外断开".into()),
                 _ => {}
             }
         }
     };
-    drop(controls);
+    drop(writer_task);
     let _ = timeout(
         IO_TIMEOUT,
         session.disconnect(Disconnect::ByApplication, "", "en"),
@@ -196,4 +201,31 @@ async fn run(
     if notify {
         let _ = output.send(TerminalEvent::Closed { error }).await;
     }
+}
+
+async fn write_controls(
+    writer: ChannelWriteHalf<russh::client::Msg>,
+    mut controls: mpsc::Receiver<Control>,
+) -> Result<(), String> {
+    while let Some(control) = controls.recv().await {
+        let (result, reply) = match control {
+            Control::Write(data, reply) => {
+                (timeout(IO_TIMEOUT, writer.data_bytes(data)).await, reply)
+            }
+            Control::Resize(size, reply) => (
+                timeout(IO_TIMEOUT, writer.window_change(size.cols, size.rows, 0, 0)).await,
+                reply,
+            ),
+            Control::Disconnect => return Ok(()),
+        };
+        let result = result
+            .map_err(|_| "SSH 写入超时".to_string())
+            .and_then(|result| result.map_err(|error| error.to_string()));
+        let failure = result.as_ref().err().cloned();
+        let _ = reply.send(result);
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+    }
+    Ok(())
 }

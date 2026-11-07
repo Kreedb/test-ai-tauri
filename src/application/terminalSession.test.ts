@@ -117,4 +117,63 @@ describe('terminal session lifecycle', () => {
     expect(f.session.phase.value).toBe('idle');
     expect(f.active.disconnect).toHaveBeenCalledTimes(1);
   });
+
+  it('ignores a second disconnect while cleanup is pending', async () => {
+    const f = fixture();
+    let finish!: () => void;
+    f.active.disconnect.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finish = resolve; }),
+    );
+    await f.session.connect(request, size);
+    const first = f.session.disconnect();
+    expect(f.session.phase.value).toBe('disconnecting');
+    await f.session.disconnect();
+    expect(f.session.phase.value).toBe('disconnecting');
+    finish();
+    await first;
+    expect(f.session.phase.value).toBe('idle');
+  });
+
+  it('closes the session when queued input exceeds the cap', async () => {
+    const f = fixture();
+    let release!: () => void;
+    f.active.write.mockImplementation(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    await f.session.connect(request, size);
+    const writes = [f.session.write(new Uint8Array(65536))];
+    await Promise.resolve();
+    expect(f.active.write).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 17; i++) writes.push(f.session.write(new Uint8Array(65536)));
+    await vi.waitFor(() => expect(f.session.phase.value).toBe('idle'));
+    expect(f.active.disconnect).toHaveBeenCalledTimes(1);
+    expect(f.session.error.value).toContain('积压');
+    release();
+    await Promise.all(writes);
+  });
+
+  it('allows a single large paste while the queue is empty', async () => {
+    const f = fixture();
+    await f.session.connect(request, size);
+    await f.session.write(new Uint8Array(2 * 1024 * 1024));
+    expect(f.active.write).toHaveBeenCalledTimes(1);
+    expect(f.session.phase.value).toBe('connected');
+  });
+
+  it('closes the session when too many writes are queued', async () => {
+    const f = fixture();
+    let release!: () => void;
+    f.active.write.mockImplementation(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+    await f.session.connect(request, size);
+    const writes = [f.session.write(new Uint8Array(1))];
+    await Promise.resolve();
+    for (let i = 0; i < 4097; i++) writes.push(f.session.write(new Uint8Array(1)));
+    await vi.waitFor(() => expect(f.session.phase.value).toBe('idle'));
+    expect(f.active.disconnect).toHaveBeenCalledTimes(1);
+    expect(f.session.error.value).toContain('积压');
+    release();
+    await Promise.all(writes);
+  });
 });

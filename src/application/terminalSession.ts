@@ -15,6 +15,11 @@ export function createTerminalSession(
   let connection: TerminalConnection | undefined;
   let generation = 0;
   let inputQueue = Promise.resolve();
+  let pendingInput = 0;
+  let pendingWrites = 0;
+
+  const MAX_PENDING_INPUT = 1024 * 1024;
+  const MAX_PENDING_WRITES = 4096;
 
   function showError(cause: unknown) {
     error.value = cause instanceof Error ? cause.message : String(cause);
@@ -55,6 +60,7 @@ export function createTerminalSession(
   }
 
   async function disconnect() {
+    if (phase.value === 'disconnecting') return;
     ++generation;
     const active = connection;
     connection = undefined;
@@ -77,8 +83,18 @@ export function createTerminalSession(
   function write(data: Uint8Array) {
     const active = connection;
     if (!active) return Promise.resolve();
+    // Cap the backlog, not a single item: a paste arrives as one large write.
+    if (pendingWrites > 0 && (pendingInput + data.length > MAX_PENDING_INPUT || pendingWrites >= MAX_PENDING_WRITES)) {
+      return fail(new Error('终端输入积压过多，连接已关闭'), active);
+    }
+    pendingInput += data.length;
+    pendingWrites += 1;
     inputQueue = inputQueue
-      .then(() => active === connection ? active.write(data) : undefined)
+      .then(() => {
+        pendingInput -= data.length;
+        pendingWrites -= 1;
+        return active === connection ? active.write(data) : undefined;
+      })
       .catch((cause: unknown) => fail(cause, active));
     return inputQueue;
   }
