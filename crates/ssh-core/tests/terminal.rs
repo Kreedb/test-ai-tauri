@@ -210,7 +210,10 @@ impl Drop for TestServer {
 }
 
 async fn connect(service: &SshService, server: &TestServer) -> u32 {
-    service.connect(server.request(), SIZE).await.unwrap()
+    service
+        .connect(server.request(), SIZE, service.generation())
+        .await
+        .unwrap()
 }
 
 async fn read_bytes(service: &SshService, id: u32, expected: &[u8]) {
@@ -279,10 +282,13 @@ async fn stalled_peer() -> (ConnectionRequest, oneshot::Receiver<()>, JoinHandle
 async fn timed_out_handshake_closes_a_chatty_peer() {
     let (request, ready, peer) = stalled_peer().await;
     let service = SshService::default();
-    let error = timeout(Duration::from_secs(20), service.connect(request, SIZE))
-        .await
-        .unwrap()
-        .unwrap_err();
+    let error = timeout(
+        Duration::from_secs(20),
+        service.connect(request, SIZE, service.generation()),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
     assert_eq!(error, "SSH 连接超时（15 秒）");
     timeout(Duration::from_secs(2), ready)
         .await
@@ -306,8 +312,8 @@ async fn reset_cancels_inflight_and_queued_connections() {
     let (pending, queued, ()) = timeout(Duration::from_secs(5), async {
         tokio::join!(
             biased;
-            service.connect(request, SIZE),
-            service.connect(server.request(), SIZE),
+            service.connect(request, SIZE, service.generation()),
+            service.connect(server.request(), SIZE, service.generation()),
             async {
                 ready.await.unwrap();
                 service.reset().await;
@@ -324,6 +330,34 @@ async fn reset_cancels_inflight_and_queued_connections() {
         .unwrap();
     let id = connect(&service, &server).await;
     read_bytes(&service, id, b"ready\r\n").await;
+    service.disconnect(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn reset_rejects_dispatched_connections_before_their_first_poll() {
+    let server = TestServer::start(false).await;
+    let service = Arc::new(SshService::default());
+    let old_page = service.clone();
+    let request = server.request();
+    let generation = service.generation();
+    let dispatched = tokio::spawn(async move { old_page.connect(request, SIZE, generation).await });
+
+    // The current-thread runtime cannot poll the spawned command before reset.
+    service.reset().await;
+    assert_eq!(dispatched.await.unwrap().unwrap_err(), "SSH 连接已取消");
+    assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 0);
+
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    assert_eq!(
+        service
+            .connect(server.request(), SIZE, generation)
+            .await
+            .unwrap_err(),
+        "SSH 连接已取消"
+    );
+    service.write(id, b"new".to_vec()).await.unwrap();
+    read_bytes(&service, id, b"new").await;
     service.disconnect(id).await.unwrap();
 }
 
@@ -368,7 +402,12 @@ async fn interactive_bytes_resize_disconnect_and_reconnect() {
     let id = connect(&service, &server).await;
     assert_eq!(server.sizes.recv().await, Some((80, 24)));
     read_bytes(&service, id, b"ready\r\n").await;
-    assert!(service.connect(server.request(), SIZE).await.is_err());
+    assert!(
+        service
+            .connect(server.request(), SIZE, service.generation())
+            .await
+            .is_err()
+    );
 
     let input = "\u{1b}[31m中文\u{1b}[0m\r".as_bytes();
     for byte in input {
@@ -412,7 +451,12 @@ async fn rejects_host_key_before_sending_password() {
     let service = SshService::default();
     let mut request = server.request();
     request.host_key_sha256 = format!("SHA256:{}", "A".repeat(43));
-    assert!(service.connect(request, SIZE).await.is_err());
+    assert!(
+        service
+            .connect(request, SIZE, service.generation())
+            .await
+            .is_err()
+    );
     assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 0);
 }
 
@@ -424,11 +468,19 @@ async fn connects_without_a_trusted_fingerprint_only_with_explicit_opt_in() {
     for fingerprint in ["", "SHA256:untrusted", &mismatched] {
         let mut request = server.request();
         request.host_key_sha256 = fingerprint.into();
-        assert!(service.connect(request, SIZE).await.is_err());
+        assert!(
+            service
+                .connect(request, SIZE, service.generation())
+                .await
+                .is_err()
+        );
         let mut request = server.request();
         request.host_key_sha256 = fingerprint.into();
         request.ignore_host_key = true;
-        let id = service.connect(request, SIZE).await.unwrap();
+        let id = service
+            .connect(request, SIZE, service.generation())
+            .await
+            .unwrap();
         read_bytes(&service, id, b"ready\r\n").await;
         service.disconnect(id).await.unwrap();
     }
@@ -443,14 +495,14 @@ async fn rejects_bad_password_and_denied_shell() {
     request.password = "wrong".into();
     assert!(
         service
-            .connect(request, SIZE)
+            .connect(request, SIZE, service.generation())
             .await
             .unwrap_err()
             .contains("认证")
     );
     assert!(
         service
-            .connect(server.request(), SIZE)
+            .connect(server.request(), SIZE, service.generation())
             .await
             .unwrap_err()
             .contains("PTY 或 shell")

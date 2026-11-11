@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -53,20 +53,30 @@ impl Drop for ActiveSession {
 pub struct SshService {
     active: Mutex<Option<ActiveSession>>,
     next_id: AtomicU32,
+    generation: AtomicU64,
     cancel_connect: Notify,
 }
 
 impl SshService {
+    /// Capture before dispatching a connection task so reset also invalidates unpolled work.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
     pub async fn connect(
         &self,
         request: ConnectionRequest,
         size: TerminalSize,
+        generation: u64,
     ) -> Result<u32, String> {
         request.validate()?;
         size.validate()?;
         // Subscribe before the lock so reset also cancels queued attempts.
         let cancelled = self.cancel_connect.notified();
         let mut active = self.active.lock().await;
+        if generation != self.generation() {
+            return Err("SSH 连接已取消".into());
+        }
         if active
             .as_ref()
             .is_some_and(|session| !session.sender.is_closed())
@@ -95,6 +105,7 @@ impl SshService {
     }
 
     pub async fn reset(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         self.cancel_connect.notify_waiters();
         let mut active = self.active.lock().await;
         if let Some(mut session) = active.take() {

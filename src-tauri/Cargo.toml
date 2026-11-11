@@ -14,3 +14,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 ssh-core = { path = "../crates/ssh-core" }
 tauri = { version = "~2.11.6", features = [] }
+
+[dev-dependencies]
+serde_json = "1"
+tauri = { version = "~2.11.6", features = ["test"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
