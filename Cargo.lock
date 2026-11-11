@@ -3953,7 +3953,6 @@ dependencies = [
 name = "ssh-core"
 version = "0.1.0"
 dependencies = [
- "rand",
  "russh",
  "serde",
  "tokio",
@@ -4343,9 +4342,11 @@ dependencies = [
 name = "tauri-ssh-template"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "ssh-core",
  "tauri",
  "tauri-build",
+ "tokio",
 ]
 
 [[package]]
