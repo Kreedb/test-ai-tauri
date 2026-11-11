@@ -1,9 +1,10 @@
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{collections::VecDeque, net::Shutdown, sync::Arc, time::Duration};
 
 use russh::{
     Channel, ChannelMsg, client,
     keys::{HashAlg, PublicKeyOrCertificate},
 };
+use tokio::net::TcpStream;
 
 use crate::{ConnectionRequest, TerminalEvent, TerminalSize};
 
@@ -24,10 +25,20 @@ impl client::Handler for HostKeyVerifier {
     }
 }
 
+pub(crate) struct SocketGuard(std::net::TcpStream);
+
+impl Drop for SocketGuard {
+    fn drop(&mut self) {
+        // russh can detach its protocol task before connect_stream returns.
+        let _ = self.0.shutdown(Shutdown::Both);
+    }
+}
+
 pub(crate) struct ConnectedSsh {
     pub session: client::Handle<HostKeyVerifier>,
     pub channel: Channel<client::Msg>,
     pub early_output: VecDeque<TerminalEvent>,
+    pub socket: SocketGuard,
 }
 
 pub(crate) async fn connect(
@@ -35,8 +46,6 @@ pub(crate) async fn connect(
     size: TerminalSize,
 ) -> Result<ConnectedSsh, String> {
     let config = Arc::new(client::Config {
-        // Reap handshakes that outlive the caller's 15s timeout; keepalives keep
-        // an authenticated idle session alive well below this limit.
         inactivity_timeout: Some(Duration::from_secs(120)),
         keepalive_interval: Some(Duration::from_secs(30)),
         keepalive_max: 3,
@@ -44,9 +53,16 @@ pub(crate) async fn connect(
         channel_buffer_size: 8,
         ..Default::default()
     });
-    let mut session = client::connect(
+    let stream = TcpStream::connect((request.host.as_str(), request.port))
+        .await
+        .map_err(|error| format!("SSH 连接失败：{error}"))?
+        .into_std()
+        .map_err(|error| error.to_string())?;
+    let socket = SocketGuard(stream.try_clone().map_err(|error| error.to_string())?);
+    let stream = TcpStream::from_std(stream).map_err(|error| error.to_string())?;
+    let mut session = client::connect_stream(
         config,
-        (request.host.as_str(), request.port),
+        stream,
         HostKeyVerifier {
             fingerprint: request.host_key_sha256.clone(),
             ignore: request.ignore_host_key,
@@ -82,6 +98,7 @@ pub(crate) async fn connect(
         session,
         channel,
         early_output,
+        socket,
     })
 }
 

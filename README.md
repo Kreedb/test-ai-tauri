@@ -61,6 +61,8 @@ Windows 10/11 需要预先安装 [WebView2 Evergreen Runtime](https://developer.
 3. 把输出中的完整 `SHA256:…` 填入指纹栏，然后连接。指纹必须对应服务器实际协商使用的主机密钥；服务器使用其他密钥算法时，应核对该密钥的指纹。
 4. 可以运行 shell、交互式程序、Ctrl+C、粘贴文本并调整窗口；点击断开或在 shell 中执行 `exit` 结束会话。
 
+刷新桌面页面会断开当前 SSH 会话并取消正在建立的连接；重新连接会创建全新的终端，清除上一会话的显示和输入状态。
+
 默认在密码发送前验证指纹。也可显式勾选“忽略主机指纹（不安全）”，无需填写指纹即可连接；这会跳过服务器身份验证，可能遭中间人攻击并泄露密码，仅在可信网络临时使用。不要把未经独立核验的 `ssh-keyscan` 结果当成可信指纹。密码不会写入磁盘、日志或浏览器存储，提交后会清空表单；这不代表进程内存中的所有副本能够被安全擦除。
 
 首版仅支持一个会话与密码认证，不含 SSH agent、私钥认证、keyboard-interactive/二次认证、会话持久化或 SFTP；服务器必须允许密码认证和交互式 shell。SSH 数据在 Rust 与 xterm 之间保持原始字节，避免跨网络分片破坏中文或 ANSI 序列。
@@ -103,6 +105,8 @@ src-tauri/
 
 ```sh
 npm test
+npx playwright install chromium       # 首次运行浏览器测试；Linux 缺少系统库时加 --with-deps
+npm run test:browser                   # Chromium 中运行真实 Vue + xterm 组件，Web CI 也会执行
 npm run build                         # Vue 类型检查 + Vite 构建
 cargo fmt --all -- --check
 cargo test -p ssh-core --locked        # 不需要 GUI 库；使用回环地址的临时 SSH 服务器
@@ -110,4 +114,4 @@ cargo clippy -p ssh-core --all-targets --locked -- -D warnings
 cargo test --workspace --locked        # 需要 Linux 桌面构建依赖
 ```
 
-测试覆盖连接状态与竞态、输入顺序和分片、Web 降级、参数校验、指纹不匹配时不发送密码、显式忽略指纹连接、认证失败、PTY/shell 拒绝、原始字节传输、输出背压、持续输出下的 Ctrl+C、缩放、主动/远端关闭及重连。测试服务器仅绑定 `127.0.0.1` 的临时端口，不需要外部 SSH 账号。
+测试覆盖连接状态与竞态、输入顺序和分片、Web 降级、参数校验、指纹不匹配时不发送密码、显式忽略指纹连接、认证失败、PTY/shell 拒绝、原始字节传输、输出背压、持续输出下的 Ctrl+C、缩放、主动/远端关闭及重连。原生回归测试还检查持续发送数据的握手在超时后关闭套接字，以及服务重置时关闭会话、取消建立中和排队的连接。浏览器测试仅模拟原生 IPC，验证真实 xterm 的二进制鼠标输入、分片 UTF-8 输出与写入背压，以及重连时终端销毁、光标和颜色恢复。测试服务器仅绑定 `127.0.0.1` 的临时端口，不需要外部 SSH 账号。

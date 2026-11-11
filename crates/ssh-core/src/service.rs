@@ -8,7 +8,7 @@ use std::{
 
 use russh::{ChannelMsg, ChannelWriteHalf, Disconnect};
 use tokio::{
-    sync::{Mutex, mpsc, oneshot},
+    sync::{Mutex, Notify, mpsc, oneshot},
     task::JoinHandle,
     time::timeout,
 };
@@ -53,6 +53,7 @@ impl Drop for ActiveSession {
 pub struct SshService {
     active: Mutex<Option<ActiveSession>>,
     next_id: AtomicU32,
+    cancel_connect: Notify,
 }
 
 impl SshService {
@@ -63,6 +64,8 @@ impl SshService {
     ) -> Result<u32, String> {
         request.validate()?;
         size.validate()?;
+        // Subscribe before the lock so reset also cancels queued attempts.
+        let cancelled = self.cancel_connect.notified();
         let mut active = self.active.lock().await;
         if active
             .as_ref()
@@ -71,9 +74,13 @@ impl SshService {
             return Err("已有 SSH 会话，请先断开连接".into());
         }
         active.take();
-        let ssh = timeout(Duration::from_secs(15), client::connect(&request, size))
-            .await
-            .map_err(|_| "SSH 连接超时（15 秒）".to_string())??;
+        let ssh = tokio::select! {
+            biased;
+            _ = cancelled => return Err("SSH 连接已取消".into()),
+            result = timeout(Duration::from_secs(15), client::connect(&request, size)) => {
+                result.map_err(|_| "SSH 连接超时（15 秒）".to_string())??
+            }
+        };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = mpsc::channel(32);
         let (output_tx, output_rx) = mpsc::channel(8);
@@ -85,6 +92,15 @@ impl SshService {
             output: Arc::new(Mutex::new(output_rx)),
         });
         Ok(id)
+    }
+
+    pub async fn reset(&self) {
+        self.cancel_connect.notify_waiters();
+        let mut active = self.active.lock().await;
+        if let Some(mut session) = active.take() {
+            session.task.abort();
+            let _ = (&mut session.task).await;
+        }
     }
 
     pub async fn read(&self, id: u32) -> Result<Option<TerminalEvent>, String> {
@@ -134,10 +150,7 @@ impl SshService {
 
     pub async fn disconnect(&self, id: u32) -> Result<(), String> {
         let mut active = self.active.lock().await;
-        if !active.as_ref().is_some_and(|session| session.id == id) {
-            return Ok(());
-        }
-        let Some(mut session) = active.take() else {
+        let Some(mut session) = active.take_if(|session| session.id == id) else {
             return Ok(());
         };
         drop(active);
@@ -154,6 +167,7 @@ async fn run(
         session,
         channel,
         mut early_output,
+        socket: _socket,
     }: ConnectedSsh,
     controls: mpsc::Receiver<Control>,
     output: mpsc::Sender<TerminalEvent>,

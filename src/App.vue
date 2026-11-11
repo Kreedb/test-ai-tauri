@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, reactive, ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, reactive, ref } from 'vue';
 import TerminalPane from './components/TerminalPane.vue';
 import { createTerminalSession } from './application/terminalSession';
 import { terminalTransport } from './platform';
 import type { ConnectionRequest } from './domain/terminal';
 
 const terminal = ref<InstanceType<typeof TerminalPane>>();
+const terminalKey = ref(0);
+let connectPending = false;
 const form = reactive<ConnectionRequest>({
   host: '',
   port: 22,
@@ -24,15 +26,22 @@ const status = computed(() => ({
 })[phase.value]);
 
 async function connect() {
-  const pane = terminal.value;
-  if (!pane) return;
-  await pane.reset();
-  const connecting = session.connect({ ...form }, pane.size());
-  form.password = '';
-  await connecting;
-  if (phase.value === 'connected') {
-    await session.resize(pane.size());
-    pane.focus();
+  if (connectPending || session.phase.value !== 'idle' || !terminalTransport.available) return;
+  connectPending = true;
+  try {
+    terminalKey.value++;
+    await nextTick();
+    const pane = terminal.value;
+    if (!pane) return;
+    const connecting = session.connect({ ...form }, pane.size());
+    form.password = '';
+    await connecting;
+    if (phase.value === 'connected') {
+      await session.resize(pane.size());
+      pane.focus();
+    }
+  } finally {
+    connectPending = false;
   }
 }
 
@@ -88,7 +97,7 @@ onBeforeUnmount(() => { void session.disconnect(); });
           <h2 id="terminal-title">远程终端</h2>
           <span role="status" :class="{ connected: phase === 'connected' }">{{ status }}</span>
         </div>
-        <TerminalPane ref="terminal" @input="session.write" @resize="session.resize" />
+        <TerminalPane :key="terminalKey" ref="terminal" :show-welcome="terminalKey === 0" @input="session.write" @resize="session.resize" />
       </section>
     </section>
     <p v-if="error" class="error" role="alert">{{ error }}</p>

@@ -7,7 +7,4 @@ rust-version.workspace = true
 [dependencies]
 russh = { version = "0.65.1", default-features = false, features = ["ring", "rsa"] }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-
-[dev-dependencies]
-rand = "0.10"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

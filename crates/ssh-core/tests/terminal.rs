@@ -8,11 +8,17 @@ use std::{
 
 use russh::{
     Channel, ChannelId, Pty,
-    keys::{Algorithm, HashAlg, PrivateKey},
+    keys::{HashAlg, PrivateKey, ssh_key::private::Ed25519Keypair},
     server::{self, Server as _, Session},
 };
 use ssh_core::{ConnectionRequest, SshService, TerminalEvent, TerminalSize};
-use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::timeout};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+    time::{interval, timeout},
+};
 
 const SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 
@@ -20,7 +26,14 @@ const SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 struct EchoServer {
     auth_attempts: Arc<AtomicUsize>,
     sizes: mpsc::UnboundedSender<(u32, u32)>,
+    closed: mpsc::UnboundedSender<()>,
     reject_shell: bool,
+}
+
+impl Drop for EchoServer {
+    fn drop(&mut self) {
+        let _ = self.closed.send(());
+    }
 }
 
 impl server::Server for EchoServer {
@@ -133,6 +146,7 @@ struct TestServer {
     fingerprint: String,
     auth_attempts: Arc<AtomicUsize>,
     sizes: mpsc::UnboundedReceiver<(u32, u32)>,
+    closed: mpsc::UnboundedReceiver<()>,
     task: JoinHandle<()>,
 }
 
@@ -142,7 +156,7 @@ impl TestServer {
     }
 
     async fn start_with(reject_shell: bool, window_size: Option<u32>) -> Self {
-        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap();
+        let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
         let mut config = server::Config {
             keys: vec![key],
@@ -156,10 +170,12 @@ impl TestServer {
         let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = socket.local_addr().unwrap().port();
         let (sizes_tx, sizes) = mpsc::unbounded_channel();
+        let (closed_tx, closed) = mpsc::unbounded_channel();
         let auth_attempts = Arc::new(AtomicUsize::new(0));
         let mut handler = EchoServer {
             auth_attempts: auth_attempts.clone(),
             sizes: sizes_tx,
+            closed: closed_tx,
             reject_shell,
         };
         let task = tokio::spawn(async move {
@@ -170,6 +186,7 @@ impl TestServer {
             fingerprint,
             auth_attempts,
             sizes,
+            closed,
             task,
         }
     }
@@ -209,6 +226,139 @@ async fn read_bytes(service: &SshService, id: u32, expected: &[u8]) {
     })
     .await
     .expect("terminal output timed out");
+}
+
+async fn stalled_peer() -> (ConnectionRequest, oneshot::Receiver<()>, JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (ready_tx, ready) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        stream.write_all(b"SSH-2.0-stalled-test\r\n").await.unwrap();
+        let mut greeting = String::new();
+        stream.read_line(&mut greeting).await.unwrap();
+        assert!(greeting.starts_with("SSH-2.0-"));
+        let length = stream.read_u32().await.unwrap() as usize;
+        assert!((2..65536).contains(&length));
+        let mut packet = vec![0; length];
+        stream.read_exact(&mut packet).await.unwrap();
+        assert_eq!(packet[1], 20, "client must have started key exchange");
+        ready_tx.send(()).unwrap();
+
+        // A valid SSH_MSG_IGNORE keeps resetting russh's inactivity timeout.
+        let ignore = [0, 0, 0, 12, 6, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut tick = interval(Duration::from_millis(100));
+        let mut buffer = [0; 1024];
+        loop {
+            tokio::select! {
+                result = stream.read(&mut buffer) => {
+                    if matches!(result, Ok(0) | Err(_)) { break; }
+                }
+                _ = tick.tick() => {
+                    if stream.write_all(&ignore).await.is_err() { break; }
+                }
+            }
+        }
+    });
+    (
+        ConnectionRequest {
+            host: "127.0.0.1".into(),
+            port,
+            username: "demo".into(),
+            password: "test-only".into(),
+            host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
+            ignore_host_key: false,
+        },
+        ready,
+        task,
+    )
+}
+
+#[tokio::test]
+async fn timed_out_handshake_closes_a_chatty_peer() {
+    let (request, ready, peer) = stalled_peer().await;
+    let service = SshService::default();
+    let error = timeout(Duration::from_secs(20), service.connect(request, SIZE))
+        .await
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error, "SSH 连接超时（15 秒）");
+    timeout(Duration::from_secs(2), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    timeout(Duration::from_secs(2), peer)
+        .await
+        .expect("timed-out peer connection stayed open")
+        .unwrap();
+    let server = TestServer::start(false).await;
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    service.disconnect(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn reset_cancels_inflight_and_queued_connections() {
+    let (request, ready, peer) = stalled_peer().await;
+    let server = TestServer::start(false).await;
+    let service = SshService::default();
+    let (pending, queued, ()) = timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            biased;
+            service.connect(request, SIZE),
+            service.connect(server.request(), SIZE),
+            async {
+                ready.await.unwrap();
+                service.reset().await;
+            },
+        )
+    })
+    .await
+    .expect("reset waited for the connection deadline");
+    assert_eq!(pending.unwrap_err(), "SSH 连接已取消");
+    assert_eq!(queued.unwrap_err(), "SSH 连接已取消");
+    timeout(Duration::from_secs(2), peer)
+        .await
+        .expect("cancelled peer connection stayed open")
+        .unwrap();
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    service.disconnect(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn reset_closes_the_active_session_and_releases_pending_reads() {
+    let mut server = TestServer::start(false).await;
+    let service = SshService::default();
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    let (read, ()) = timeout(Duration::from_secs(2), async {
+        tokio::join!(biased; service.read(id), service.reset())
+    })
+    .await
+    .expect("reset did not release a pending read");
+    assert!(read.unwrap().is_none());
+    assert_eq!(
+        timeout(Duration::from_secs(2), server.closed.recv())
+            .await
+            .expect("reset left the server session open"),
+        Some(())
+    );
+    assert!(service.write(id, b"stale".to_vec()).await.is_err());
+    let new_id = connect(&service, &server).await;
+    assert_ne!(id, new_id);
+    service.disconnect(id).await.unwrap();
+    read_bytes(&service, new_id, b"ready\r\n").await;
+    service.write(new_id, b"new".to_vec()).await.unwrap();
+    read_bytes(&service, new_id, b"new").await;
+    drop(service);
+    assert_eq!(
+        timeout(Duration::from_secs(2), server.closed.recv())
+            .await
+            .expect("dropping the service left the server session open"),
+        Some(())
+    );
 }
 
 #[tokio::test]

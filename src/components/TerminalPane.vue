@@ -5,6 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import type { TerminalSize } from '../domain/terminal';
 import '@xterm/xterm/css/xterm.css';
 
+const props = defineProps<{ showWelcome: boolean }>();
 const emit = defineEmits<{
   input: [data: Uint8Array];
   resize: [size: TerminalSize];
@@ -24,8 +25,10 @@ onMounted(() => {
   if (!container.value) return;
   terminal.loadAddon(fit);
   terminal.open(container.value);
-  terminal.writeln('Tauri SSH Terminal');
-  terminal.writeln('在桌面版中填写连接信息并核验主机指纹，即可打开远程 shell。');
+  if (props.showWelcome) {
+    terminal.writeln('Tauri SSH Terminal');
+    terminal.writeln('在桌面版中填写连接信息并核验主机指纹，即可打开远程 shell。');
+  }
   terminal.onData((data) => emit('input', new TextEncoder().encode(data)));
   terminal.onBinary((data) => emit('input', Uint8Array.from(data, (char) => char.charCodeAt(0))));
   terminal.onResize((size) => emit('resize', size));
@@ -41,8 +44,6 @@ onBeforeUnmount(() => {
 
 defineExpose({
   write: (data: Uint8Array) => new Promise<void>((resolve) => terminal.write(data, resolve)),
-  // CAN cancels an unfinished escape string, then RIS resets parser and screen.
-  reset: () => new Promise<void>((resolve) => terminal.write(Uint8Array.of(0x18, 0x1b, 0x63), resolve)),
   focus: () => terminal.focus(),
   size: (): TerminalSize => ({ cols: terminal.cols, rows: terminal.rows }),
 });
