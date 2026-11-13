@@ -69,7 +69,7 @@ Windows 10/11 需要预先安装 [WebView2 Evergreen Runtime](https://developer.
 
 ## GitHub Pages 与 CI 产物
 
-在仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。合并到 `main` 后，`Deploy Web to GitHub Pages` 工作流会发布静态站点，也可以手动触发。
+在仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。合并到 `main` 后，`Build and test` 工作流的部署任务会发布静态站点，也可以手动触发。
 
 Vite 使用相对资源路径 `base: './'`，同时适用于 `https://<owner>.github.io/<repo>/`、用户主页仓库与自定义域名。默认站点地址为 <https://kreedb.github.io/test-ai-tauri/>，首次部署完成后生效。
 
@@ -105,7 +105,7 @@ src-tauri/
 
 ```sh
 npm test
-npx playwright install chromium       # 首次运行浏览器测试；Linux 缺少系统库时加 --with-deps
+npx playwright install --only-shell chromium  # 首次运行浏览器测试；Linux 缺少系统库时加 --with-deps
 npm run test:browser                   # Chromium 中运行真实 Vue + xterm 组件，Web CI 也会执行
 npm run build                         # Vue 类型检查 + Vite 构建
 npm run test:preview                  # 在 /test-ai-tauri/ 路径下加载构建产物，验证 Web 预览

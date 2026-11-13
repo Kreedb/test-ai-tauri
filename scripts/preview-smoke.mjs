@@ -1,45 +1,27 @@
 // Serves the built site under the GitHub Pages repository prefix and checks the
 // Web preview without a Tauri mock. Run `npm run build` first.
-import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize, sep } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { preview } from 'vite';
 
-const root = fileURLToPath(new URL('../dist', import.meta.url));
+const root = fileURLToPath(new URL('..', import.meta.url));
 const prefix = '/test-ai-tauri/';
-const types = {
-  '.css': 'text/css; charset=utf-8',
-  '.html': 'text/html; charset=utf-8',
-  '.ico': 'image/x-icon',
-  '.js': 'text/javascript; charset=utf-8',
-  '.png': 'image/png',
-  '.svg': 'image/svg+xml',
-  '.woff2': 'font/woff2',
-};
 
-await readFile(join(root, 'index.html')).catch(() => {
+await readFile(join(root, 'dist', 'index.html')).catch(() => {
   throw new Error('dist/index.html is missing; run `npm run build` first');
 });
 
-const server = createServer(async (request, response) => {
-  const { pathname } = new URL(request.url, 'http://localhost');
-  const relative = decodeURIComponent(pathname.slice(prefix.length)) || 'index.html';
-  const file = join(root, normalize(relative));
-  if (!pathname.startsWith(prefix) || !file.startsWith(root + sep)) {
-    response.writeHead(404).end();
-    return;
-  }
-  try {
-    const body = await readFile(file);
-    response.writeHead(200, { 'content-type': types[extname(file)] ?? 'application/octet-stream' });
-    response.end(body);
-  } catch {
-    response.writeHead(404).end();
-  }
+// `appType: 'mpa'` keeps missing assets as 404s instead of the SPA fallback.
+const server = await preview({
+  root,
+  base: prefix,
+  appType: 'mpa',
+  logLevel: 'error',
+  preview: { host: '127.0.0.1', port: 0 },
 });
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-const base = `http://127.0.0.1:${server.address().port}${prefix}`;
+const base = server.resolvedUrls.local[0];
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -83,5 +65,5 @@ try {
   console.log(`Web preview OK at ${base}`);
 } finally {
   await browser.close();
-  server.close();
+  await server.close();
 }

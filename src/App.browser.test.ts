@@ -177,6 +177,8 @@ describe('real Vue terminal in Chromium', () => {
     await page.getByLabelText('密码', { exact: true }).fill('test-only');
     await page.getByRole('button', { name: '连接 SSH' }).click();
     await expect.element(page.getByRole('alert')).toHaveTextContent('authentication failed');
+    // The alert must stay above the workspace so a small window still shows it.
+    expect(host.querySelector('[role="alert"]')!.nextElementSibling).toBe(host.querySelector('.workspace'));
     const failed = terminal();
     const result = deferred<number>();
     vi.mocked(invoke).mockImplementationOnce(() => result.promise);

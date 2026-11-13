@@ -29,6 +29,7 @@ struct EchoServer {
     opened: mpsc::UnboundedSender<usize>,
     closed: mpsc::UnboundedSender<()>,
     reject_shell: bool,
+    flood_on_shell: bool,
 }
 
 impl Drop for EchoServer {
@@ -99,6 +100,11 @@ impl server::Handler for EchoServer {
         } else {
             session.channel_success(channel)?;
             session.data(channel, b"ready\r\n".to_vec())?;
+            if self.flood_on_shell {
+                for _ in 0..256 {
+                    session.data(channel, vec![b'x'; 32768])?;
+                }
+            }
         }
         Ok(())
     }
@@ -174,7 +180,19 @@ impl TestServer {
         Self::start_with(reject_shell, None).await
     }
 
+    async fn start_flooding(window_size: Option<u32>) -> Self {
+        Self::start_full(false, window_size, true).await
+    }
+
     async fn start_with(reject_shell: bool, window_size: Option<u32>) -> Self {
+        Self::start_full(reject_shell, window_size, false).await
+    }
+
+    async fn start_full(
+        reject_shell: bool,
+        window_size: Option<u32>,
+        flood_on_shell: bool,
+    ) -> Self {
         let key = PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]));
         let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
         let mut config = server::Config {
@@ -198,6 +216,7 @@ impl TestServer {
             opened: opened_tx,
             closed: closed_tx,
             reject_shell,
+            flood_on_shell,
         };
         let task = tokio::spawn(async move {
             handler.run_on_socket(config, &socket).await.unwrap();
@@ -303,19 +322,26 @@ async fn stalled_peer() -> (ConnectionRequest, oneshot::Receiver<()>, JoinHandle
 #[tokio::test]
 async fn timed_out_handshake_closes_a_chatty_peer() {
     let (request, ready, peer) = stalled_peer().await;
-    let service = SshService::default();
-    let error = timeout(
-        Duration::from_secs(20),
-        service.connect(request, SIZE, service.generation()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert_eq!(error, "SSH 连接超时（15 秒）");
-    timeout(Duration::from_secs(2), ready)
+    let service = Arc::new(SshService::default());
+    let generation = service.generation();
+    let connecting = tokio::spawn({
+        let service = service.clone();
+        async move { service.connect(request, SIZE, generation).await }
+    });
+    timeout(Duration::from_secs(5), ready)
         .await
-        .unwrap()
+        .expect("peer never became ready")
         .unwrap();
+    // Skip the real 15 second wait; the timeout itself still fires.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(16)).await;
+    tokio::time::resume();
+    let error = timeout(Duration::from_secs(2), connecting)
+        .await
+        .expect("handshake timeout did not fire")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error, "SSH 连接超时（15 秒）");
     timeout(Duration::from_secs(2), peer)
         .await
         .expect("timed-out peer connection stayed open")
@@ -468,26 +494,14 @@ async fn interactive_bytes_resize_disconnect_and_reconnect() {
 }
 
 #[tokio::test]
-async fn rejects_host_key_before_sending_password() {
-    let server = TestServer::start(false).await;
-    let service = SshService::default();
-    let mut request = server.request();
-    request.host_key_sha256 = format!("SHA256:{}", "A".repeat(43));
-    assert!(
-        service
-            .connect(request, SIZE, service.generation())
-            .await
-            .is_err()
-    );
-    assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn connects_without_a_trusted_fingerprint_only_with_explicit_opt_in() {
     let server = TestServer::start(false).await;
     let service = SshService::default();
     let mismatched = format!("SHA256:{}", "A".repeat(43));
-    for fingerprint in ["", "SHA256:untrusted", &mismatched] {
+    for (attempt, fingerprint) in ["", "SHA256:untrusted", &mismatched]
+        .into_iter()
+        .enumerate()
+    {
         let mut request = server.request();
         request.host_key_sha256 = fingerprint.into();
         assert!(
@@ -496,6 +510,8 @@ async fn connects_without_a_trusted_fingerprint_only_with_explicit_opt_in() {
                 .await
                 .is_err()
         );
+        // A rejected host key is checked before the password is ever sent.
+        assert_eq!(server.auth_attempts.load(Ordering::SeqCst), attempt);
         let mut request = server.request();
         request.host_key_sha256 = fingerprint.into();
         request.ignore_host_key = true;
@@ -504,9 +520,9 @@ async fn connects_without_a_trusted_fingerprint_only_with_explicit_opt_in() {
             .await
             .unwrap();
         read_bytes(&service, id, b"ready\r\n").await;
+        assert_eq!(server.auth_attempts.load(Ordering::SeqCst), attempt + 1);
         service.disconnect(id).await.unwrap();
     }
-    assert_eq!(server.auth_attempts.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]
@@ -657,6 +673,40 @@ async fn remains_responsive_with_a_full_output_queue() {
 }
 
 #[tokio::test]
+async fn releases_the_socket_when_a_write_times_out_with_a_full_output_queue() {
+    let mut server = TestServer::start_flooding(Some(0)).await;
+    let service = Arc::new(SshService::default());
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    // Let the flood fill the bounded output queue while nothing reads it.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let write = tokio::spawn({
+        let service = service.clone();
+        async move { service.write(id, b"x".to_vec()).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Skip the real write timeout; the session must still release its socket.
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(6)).await;
+    tokio::time::resume();
+    assert!(
+        timeout(Duration::from_secs(1), write)
+            .await
+            .expect("write did not fail")
+            .unwrap()
+            .is_err()
+    );
+    // The peer must see the close even though the final output is never read.
+    assert_eq!(
+        timeout(Duration::from_secs(2), server.closed.recv())
+            .await
+            .expect("socket stayed open behind a full output queue"),
+        Some(())
+    );
+    service.disconnect(id).await.unwrap();
+}
+
+#[tokio::test]
 async fn sends_interrupt_during_backpressured_output() {
     let mut server = TestServer::start(false).await;
     let service = SshService::default();
@@ -665,10 +715,9 @@ async fn sends_interrupt_during_backpressured_output() {
     assert_eq!(server.sizes.recv().await, Some((80, 24)));
     service.write(id, b"flood\r".to_vec()).await.unwrap();
     let reader = async {
-        let mut bytes = 0;
-        while bytes < 256 * 32768 {
+        loop {
             match service.read(id).await.unwrap().unwrap() {
-                TerminalEvent::Data { data } => bytes += data.len(),
+                TerminalEvent::Data { .. } => {}
                 TerminalEvent::Closed { error } => panic!("closed during output: {error:?}"),
             }
             tokio::time::sleep(Duration::from_millis(16)).await;
@@ -684,10 +733,13 @@ async fn sends_interrupt_during_backpressured_output() {
             Some((0, 0))
         );
     };
-    timeout(Duration::from_secs(10), async {
-        tokio::join!(reader, interrupt);
+    timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            _ = reader => panic!("output reader finished before the interrupt"),
+            _ = interrupt => {}
+        }
     })
     .await
-    .unwrap();
+    .expect("interrupt was starved by backpressured output");
     service.disconnect(id).await.unwrap();
 }
