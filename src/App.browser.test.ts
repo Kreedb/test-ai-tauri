@@ -5,7 +5,7 @@ import { createApp, nextTick } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { invoke } from '@tauri-apps/api/core';
 import App from './App.vue';
-import type { TerminalEvent } from './domain/terminal';
+import type { TerminalEvent, TerminalSize } from './domain/terminal';
 import { settingsKey } from './platform/settingsStorage';
 import './style.css';
 
@@ -24,13 +24,21 @@ let host: HTMLDivElement;
 let opened: MockInstance<Terminal['open']>;
 let disposed: MockInstance<Terminal['dispose']>;
 let reads: ReturnType<typeof deferred<TerminalEvent | null>>[];
+// Snapshot the terminal size when each connect is issued: the pane can refit again
+// after the call, and ssh_resize forwards that later size to the server.
+const connectSizes: TerminalSize[] = [];
 const terminal = () => opened.mock.contexts.at(-1) as Terminal;
+const recordConnectSize = () => connectSizes.push({ cols: terminal().cols, rows: terminal().rows });
 
 beforeEach(async () => {
   localStorage.removeItem(settingsKey);
   reads = [];
+  connectSizes.length = 0;
   vi.mocked(invoke).mockReset().mockImplementation(async (command) => {
-    if (command === 'ssh_connect') return calls('ssh_connect').length;
+    if (command === 'ssh_connect') {
+      recordConnectSize();
+      return calls('ssh_connect').length;
+    }
     if (command === 'ssh_read') {
       const read = deferred<TerminalEvent | null>();
       reads.push(read);
@@ -279,11 +287,15 @@ describe('real Vue terminal in Chromium', () => {
     old.input('orphaned input');
     await Promise.resolve();
     expect(calls('ssh_write')).toHaveLength(writes);
-    expect(calls('ssh_connect')[1]![1]).toMatchObject({ size: { cols: fresh.cols, rows: fresh.rows } });
+    expect(connectSizes).toHaveLength(2);
+    expect(calls('ssh_connect')[1]![1]).toMatchObject({ size: connectSizes[1]! });
   });
 
   it('starts fresh after a failed connection and ignores duplicate submits while connecting', async () => {
-    vi.mocked(invoke).mockRejectedValueOnce(new Error('authentication failed'));
+    vi.mocked(invoke).mockImplementationOnce(() => {
+      recordConnectSize();
+      return Promise.reject(new Error('authentication failed'));
+    });
     await page.getByLabelText('密码', { exact: true }).fill('test-only');
     await page.getByRole('button', { name: '连接 SSH' }).click();
     await expect.element(page.getByRole('alert')).toHaveTextContent('authentication failed');
@@ -291,7 +303,10 @@ describe('real Vue terminal in Chromium', () => {
     expect(host.querySelector('[role="alert"]')!.nextElementSibling).toBe(host.querySelector('.workspace'));
     const failed = terminal();
     const result = deferred<number>();
-    vi.mocked(invoke).mockImplementationOnce(() => result.promise);
+    vi.mocked(invoke).mockImplementationOnce(() => {
+      recordConnectSize();
+      return result.promise;
+    });
     await page.getByLabelText('密码', { exact: true }).fill('test-only');
     // The next mount must measure the new layout before ssh_connect reads its size.
     host.querySelector('main')!.style.maxWidth = '1000px';
@@ -308,7 +323,8 @@ describe('real Vue terminal in Chromium', () => {
     expect(calls('ssh_connect')).toHaveLength(2);
     result.resolve(2);
     await expect.element(page.getByRole('status')).toHaveTextContent('已连接');
-    expect(calls('ssh_connect')[1]![1]).toMatchObject({ size: { cols: terminal().cols, rows: terminal().rows } });
+    expect(calls('ssh_connect')[1]![1]).toMatchObject({ size: connectSizes[1]! });
+    expect(connectSizes[1]!.cols).toBeLessThan(failed.cols);
     await expect.poll(() => document.activeElement).toBe(terminal().textarea);
     await expect.element(page.getByLabelText('密码', { exact: true })).toHaveValue('');
   });
