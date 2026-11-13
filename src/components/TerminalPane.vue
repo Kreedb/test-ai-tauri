@@ -1,25 +1,29 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import type { TerminalSize } from '../domain/terminal';
+import { terminalColors, type TerminalSettings } from '../domain/settings';
 import '@xterm/xterm/css/xterm.css';
 
-const props = defineProps<{ showWelcome: boolean }>();
+const props = defineProps<{ showWelcome: boolean; settings: TerminalSettings }>();
 const emit = defineEmits<{
   input: [data: Uint8Array];
   resize: [size: TerminalSize];
 }>();
 const container = ref<HTMLDivElement>();
-const terminal = new Terminal({
-  cursorBlink: true,
-  fontSize: 14,
-  fontFamily: 'ui-monospace, SFMono-Regular, Consolas, monospace',
-  screenReaderMode: true,
-  theme: { background: '#10151e', foreground: '#dce4ef', cursor: '#7dd3c0' },
-});
+function options() {
+  const { fontFamily, fontSize, lineHeight, scrollback, cursorStyle, cursorBlink, screenReaderMode } = props.settings;
+  return { fontFamily, fontSize, lineHeight, scrollback, cursorStyle, cursorBlink, screenReaderMode, theme: terminalColors(props.settings) };
+}
+const terminal = new Terminal(options());
 const fit = new FitAddon();
 let observer: ResizeObserver | undefined;
+
+watch(() => props.settings, () => {
+  terminal.options = options();
+  fit.fit();
+}, { flush: 'post' });
 
 onMounted(() => {
   if (!container.value) return;
@@ -45,6 +49,7 @@ onBeforeUnmount(() => {
 defineExpose({
   write: (data: Uint8Array) => new Promise<void>((resolve) => terminal.write(data, resolve)),
   focus: () => terminal.focus(),
+  clear: () => terminal.clear(),
   size: (): TerminalSize => ({ cols: terminal.cols, rows: terminal.rows }),
 });
 </script>

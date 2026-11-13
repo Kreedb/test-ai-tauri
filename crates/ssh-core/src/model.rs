@@ -10,6 +10,55 @@ pub struct ConnectionRequest {
     pub host_key_sha256: String,
     #[serde(default)]
     pub ignore_host_key: bool,
+    #[serde(default)]
+    pub options: ConnectionOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConnectionOptions {
+    pub term: String,
+    pub connect_timeout_secs: u64,
+    pub keepalive_interval_secs: u64,
+    pub keepalive_max: usize,
+    pub inactivity_timeout_secs: u64,
+}
+
+impl Default for ConnectionOptions {
+    fn default() -> Self {
+        Self {
+            term: "xterm-256color".into(),
+            connect_timeout_secs: 15,
+            keepalive_interval_secs: 30,
+            keepalive_max: 3,
+            inactivity_timeout_secs: 120,
+        }
+    }
+}
+
+impl ConnectionOptions {
+    fn validate(&self) -> Result<(), &'static str> {
+        if self.term.is_empty()
+            || self.term.len() > 64
+            || !self.term.as_bytes()[0].is_ascii_alphanumeric()
+            || !self
+                .term
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'+' | b'-'))
+        {
+            return Err("TERM 必须是 1 到 64 个字母、数字或 ._+-，且以字母或数字开头");
+        }
+        if !(1..=120).contains(&self.connect_timeout_secs) {
+            return Err("连接超时必须在 1 到 120 秒之间");
+        }
+        if self.keepalive_interval_secs > 300 || !(1..=10).contains(&self.keepalive_max) {
+            return Err("保活间隔必须在 0 到 300 秒之间，最大未响应次数必须在 1 到 10 之间");
+        }
+        if self.inactivity_timeout_secs > 86400 {
+            return Err("无数据超时必须在 0 到 86400 秒之间");
+        }
+        Ok(())
+    }
 }
 
 impl ConnectionRequest {
@@ -45,7 +94,7 @@ impl ConnectionRequest {
                 return Err("请输入可信的 OpenSSH SHA256 主机指纹（SHA256: 后接 43 个字符）");
             }
         }
-        Ok(())
+        self.options.validate()
     }
 }
 
@@ -83,6 +132,7 @@ mod tests {
             password: "test-only".into(),
             host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
             ignore_host_key: false,
+            options: ConnectionOptions::default(),
         }
     }
 
@@ -123,6 +173,35 @@ mod tests {
         input.host_key_sha256 = "invalid".into();
         assert!(input.validate().is_ok());
         input.password.clear();
+        assert!(input.validate().is_err());
+    }
+
+    #[test]
+    fn bounds_custom_connection_options() {
+        let mut input = request();
+        input.options.term = "vt100".into();
+        input.options.keepalive_interval_secs = 0;
+        input.options.inactivity_timeout_secs = 0;
+        assert!(input.validate().is_ok());
+        for term in ["", "xterm\n", "../term", "-xterm"] {
+            input.options.term = term.into();
+            assert!(input.validate().is_err());
+        }
+        input = request();
+        input.options.connect_timeout_secs = 0;
+        assert!(input.validate().is_err());
+        input.options.connect_timeout_secs = 121;
+        assert!(input.validate().is_err());
+        input = request();
+        input.options.keepalive_interval_secs = 301;
+        assert!(input.validate().is_err());
+        input = request();
+        input.options.keepalive_max = 0;
+        assert!(input.validate().is_err());
+        input.options.keepalive_max = 11;
+        assert!(input.validate().is_err());
+        input = request();
+        input.options.inactivity_timeout_secs = 86401;
         assert!(input.validate().is_err());
     }
 

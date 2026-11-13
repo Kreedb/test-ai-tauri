@@ -61,6 +61,19 @@ try {
     () => getComputedStyle(document.documentElement).backgroundColor,
   );
   assert(background === 'rgb(11, 16, 24)', `stylesheet did not load (background ${background})`);
+
+  await page.getByRole('button', { name: '工作区设置' }).click();
+  await page.getByLabel('界面主题').selectOption('light');
+  await page.getByLabel('字号（px）').fill('18');
+  await page.getByRole('button', { name: '应用设置' }).click();
+  await page.reload({ waitUntil: 'networkidle' });
+  assert(await page.getByRole('button', { name: '连接 SSH' }).isDisabled(), 'settings enabled Web SSH');
+  assert(await page.evaluate(() => document.documentElement.dataset.theme) === 'light', 'theme did not persist');
+  await page.setViewportSize({ width: 360, height: 800 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'mobile workspace overflows');
+  await page.getByRole('button', { name: '工作区设置' }).click();
+  assert(await page.getByLabel('字号（px）').inputValue() === '18', 'terminal settings did not persist');
+  assert(await page.getByRole('button', { name: '应用设置' }).isVisible(), 'mobile settings actions are hidden');
   assert(failures.length === 0, failures.join('\n'));
   console.log(`Web preview OK at ${base}`);
 } finally {

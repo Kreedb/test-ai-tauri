@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
-import { page } from 'vitest/browser';
+import { page, userEvent } from 'vitest/browser';
 import type {} from '@vitest/browser-playwright';
 import { createApp, nextTick } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { invoke } from '@tauri-apps/api/core';
 import App from './App.vue';
 import type { TerminalEvent } from './domain/terminal';
+import { settingsKey } from './platform/settingsStorage';
 import './style.css';
 
 vi.mock('@tauri-apps/api/core', () => ({ isTauri: () => true, invoke: vi.fn() }));
@@ -26,6 +27,7 @@ let reads: ReturnType<typeof deferred<TerminalEvent | null>>[];
 const terminal = () => opened.mock.contexts.at(-1) as Terminal;
 
 beforeEach(async () => {
+  localStorage.removeItem(settingsKey);
   reads = [];
   vi.mocked(invoke).mockReset().mockImplementation(async (command) => {
     if (command === 'ssh_connect') return calls('ssh_connect').length;
@@ -54,6 +56,7 @@ afterEach(async () => {
   reads.forEach((read) => read.resolve(null));
   await nextTick();
   host.remove();
+  localStorage.removeItem(settingsKey);
   vi.restoreAllMocks();
 });
 
@@ -70,6 +73,113 @@ async function output(data: string | number[]) {
 }
 
 describe('real Vue terminal in Chromium', () => {
+  it('applies and persists settings without restarting a live terminal, using SSH options on reconnect', async () => {
+    await connect();
+    await output('retained output');
+    const term = terminal();
+    const cols = term.cols;
+    await page.getByRole('button', { name: '工作区设置' }).click();
+    await page.getByLabelText('界面主题').selectOptions('light');
+    await page.getByLabelText('强调色').selectOptions('blue');
+    await page.getByLabelText('字号（px）').fill('20');
+    await page.getByLabelText('行高', { exact: true }).fill('1.3');
+    await page.getByLabelText('回滚行数').fill('4000');
+    await page.getByLabelText('光标样式').selectOptions('bar');
+    await page.getByLabelText('终端配色').selectOptions('paper');
+    await page.getByLabelText('终端类型（TERM）').fill('vt100');
+    await page.getByLabelText('连接超时（秒）').fill('42');
+    await page.getByLabelText('保活间隔（秒）').fill('0');
+    await page.getByLabelText('无数据超时（秒）').fill('0');
+    await page.getByRole('button', { name: '应用设置' }).click();
+    expect(host.querySelector('dialog')!.open).toBe(false);
+    expect(terminal()).toBe(term);
+    expect(calls('ssh_connect')).toHaveLength(1);
+    expect(term.options).toMatchObject({ fontSize: 20, lineHeight: 1.3, scrollback: 4000, cursorStyle: 'bar' });
+    expect(term.buffer.active.getLine(0)!.translateToString(true)).toBe('retained output');
+    await expect.poll(() => term.cols).toBeLessThan(cols);
+    await expect.poll(() => calls('ssh_resize').at(-1)?.[1]).toMatchObject({ size: { cols: term.cols, rows: term.rows } });
+    expect(getComputedStyle(term.element!.querySelector('.xterm-rows')!).color).toBe('rgb(30, 41, 59)');
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(document.documentElement.dataset.accent).toBe('blue');
+    const saved = localStorage.getItem(settingsKey)!;
+    expect(JSON.parse(saved).ssh).toMatchObject({ term: 'vt100', connectTimeoutSecs: 42, keepaliveIntervalSecs: 0, inactivityTimeoutSecs: 0 });
+    expect(saved).not.toContain('password');
+    expect(saved).not.toContain('localhost');
+    expect(saved).not.toContain('ignoreHostKey');
+
+    await page.getByRole('button', { name: '断开连接' }).click();
+    await connect();
+    expect(calls('ssh_connect')[1]![1]).toMatchObject({ request: { options: JSON.parse(saved).ssh } });
+    expect(terminal().options.fontSize).toBe(20);
+    app.unmount();
+    app = createApp(App);
+    app.mount(host);
+    await nextTick();
+    expect(terminal().options.fontSize).toBe(20);
+    await expect.element(page.getByLabelText('密码', { exact: true })).toHaveValue('');
+    await expect.element(page.getByLabelText('忽略主机指纹（不安全）')).not.toBeChecked();
+  });
+
+  it('keeps edits as a draft, restores focus on Escape, and applies defaults only on confirmation', async () => {
+    const trigger = page.getByRole('button', { name: '工作区设置' });
+    await trigger.click();
+    await page.getByLabelText('字号（px）').fill('24');
+    await userEvent.keyboard('{Escape}');
+    expect(host.querySelector('dialog')!.open).toBe(false);
+    expect(terminal().options.fontSize).toBe(14);
+    expect(localStorage.getItem(settingsKey)).toBeNull();
+    await expect.element(trigger).toHaveFocus();
+    await trigger.click();
+    await expect.element(page.getByLabelText('字号（px）')).toHaveValue(14);
+    await page.getByLabelText('字号（px）').fill('20');
+    await page.getByRole('button', { name: '应用设置' }).click();
+    await trigger.click();
+    await page.getByRole('button', { name: '恢复默认' }).click();
+    expect(terminal().options.fontSize).toBe(20);
+    await page.getByRole('button', { name: '应用设置' }).click();
+    expect(terminal().options.fontSize).toBe(14);
+  });
+
+  it('preserves the current draft on invalid import and omits credentials from exported settings', async () => {
+    await page.getByRole('button', { name: '工作区设置' }).click();
+    const input = host.querySelector<HTMLInputElement>('input[type="file"]')!;
+    async function upload(value: string) {
+      const files = new DataTransfer();
+      files.items.add(new File([value], 'settings.json', { type: 'application/json' }));
+      input.files = files.files;
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      await nextTick();
+    }
+    await page.getByLabelText('字号（px）').fill('18');
+    await upload('{"version":1,"terminal":{"fontSize":99}}');
+    await expect.poll(() => host.querySelector('[role="alert"]')?.textContent).toContain('fontSize');
+    await expect.element(page.getByLabelText('字号（px）')).toHaveValue(18);
+    await upload('{"version":1,"terminal":{"fontSize":16},"password":"test-only","ignoreHostKey":true}');
+    await expect.element(page.getByLabelText('字号（px）')).toHaveValue(16);
+    expect(terminal().options.fontSize).toBe(14);
+    const createUrl = vi.spyOn(URL, 'createObjectURL');
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    await page.getByRole('button', { name: '导出配置' }).click();
+    const blob = createUrl.mock.calls[0]![0] as Blob;
+    const exported = await blob.text();
+    expect(JSON.parse(exported).terminal.fontSize).toBe(16);
+    expect(exported).not.toContain('password');
+    expect(exported).not.toContain('ignoreHostKey');
+    expect(click).toHaveBeenCalledOnce();
+    expect((click.mock.contexts[0] as HTMLAnchorElement).download).toMatch(/^ssh-terminal-settings-\d{4}-.*\.json$/);
+    await page.getByRole('button', { name: '应用设置' }).click();
+    expect(terminal().options.fontSize).toBe(16);
+  });
+
+  it('reports unavailable persistence while keeping applied settings usable', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota exceeded'); });
+    await page.getByRole('button', { name: '工作区设置' }).click();
+    await page.getByLabelText('字号（px）').fill('18');
+    await page.getByRole('button', { name: '应用设置' }).click();
+    expect(terminal().options.fontSize).toBe(18);
+    await expect.poll(() => host.querySelector('[role="alert"]')?.textContent).toContain('无法保存到本地');
+  });
+
   it('forwards a real legacy mouse report containing 0xff through onBinary and IPC', async () => {
     await connect();
     const term = terminal();

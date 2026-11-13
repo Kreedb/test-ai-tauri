@@ -86,8 +86,8 @@ impl SshService {
         let ssh = tokio::select! {
             biased;
             _ = cancelled => return Err("SSH 连接已取消".into()),
-            result = timeout(Duration::from_secs(15), client::connect(&request, size)) => {
-                result.map_err(|_| "SSH 连接超时（15 秒）".to_string())??
+            result = timeout(Duration::from_secs(request.options.connect_timeout_secs), client::connect(&request, size)) => {
+                result.map_err(|_| format!("SSH 连接超时（{} 秒）", request.options.connect_timeout_secs))??
             }
         };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);

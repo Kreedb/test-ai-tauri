@@ -124,9 +124,11 @@ pub(crate) async fn connect(
     size: TerminalSize,
 ) -> Result<ConnectedSsh, String> {
     let config = Arc::new(client::Config {
-        inactivity_timeout: Some(Duration::from_secs(120)),
-        keepalive_interval: Some(Duration::from_secs(30)),
-        keepalive_max: 3,
+        inactivity_timeout: (request.options.inactivity_timeout_secs > 0)
+            .then(|| Duration::from_secs(request.options.inactivity_timeout_secs)),
+        keepalive_interval: (request.options.keepalive_interval_secs > 0)
+            .then(|| Duration::from_secs(request.options.keepalive_interval_secs)),
+        keepalive_max: request.options.keepalive_max,
         // Keep the receive backlog short so terminal input is not queued behind many rendered chunks.
         channel_buffer_size: 8,
         ..Default::default()
@@ -165,7 +167,7 @@ pub(crate) async fn connect(
         // Without IUTF8 the remote line editor erases one byte, corrupting multi-byte input.
         .request_pty(
             true,
-            "xterm-256color",
+            &request.options.term,
             size.cols,
             size.rows,
             0,
