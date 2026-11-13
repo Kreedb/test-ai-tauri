@@ -12,6 +12,7 @@
     "preview": "vite preview",
     "test": "vitest run --project unit",
     "test:browser": "vitest run --project browser",
+    "test:preview": "node scripts/preview-smoke.mjs",
     "check": "vue-tsc --noEmit",
     "tauri": "tauri",
     "desktop:dev": "tauri dev",

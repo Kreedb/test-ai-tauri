@@ -77,7 +77,7 @@ mod tests {
     use tauri::{
         Manager, WebviewWindow,
         ipc::{CallbackFn, InvokeResponse},
-        test::{MockRuntime, mock_builder, mock_context, noop_assets},
+        test::{MockRuntime, mock_builder},
         webview::InvokeRequest,
     };
     use tokio::{net::TcpListener, sync::oneshot, time::timeout};
@@ -87,6 +87,7 @@ mod tests {
     fn dispatch_connect(
         webview: &WebviewWindow<MockRuntime>,
         port: u16,
+        url: tauri::Url,
     ) -> oneshot::Receiver<InvokeResponse> {
         let (sender, response) = oneshot::channel();
         webview.clone().on_message(
@@ -94,7 +95,7 @@ mod tests {
                 cmd: "ssh_connect".into(),
                 callback: CallbackFn(0),
                 error: CallbackFn(1),
-                url: webview.url().unwrap(),
+                url,
                 body: json!({
                     "request": {
                         "host": "127.0.0.1",
@@ -123,7 +124,7 @@ mod tests {
         let app = mock_builder()
             .manage(SshService::default())
             .invoke_handler(handle)
-            .build(mock_context(noop_assets()))
+            .build(tauri::generate_context!())
             .unwrap();
         let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
             .build()
@@ -132,7 +133,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let service = app.state::<SshService>();
 
-        let stale = dispatch_connect(&webview, port);
+        let stale = dispatch_connect(&webview, port, webview.url().unwrap());
         service.reset().await;
         let response = timeout(Duration::from_secs(2), stale)
             .await
@@ -143,7 +144,7 @@ mod tests {
             InvokeResponse::Ok(_) => panic!("stale command created a session"),
         }
 
-        let fresh = dispatch_connect(&webview, port);
+        let fresh = dispatch_connect(&webview, port, webview.url().unwrap());
         let (socket, _) = timeout(Duration::from_secs(2), listener.accept())
             .await
             .expect("replacement page could not start a connection")
@@ -154,5 +155,40 @@ mod tests {
             InvokeResponse::Err(error) if error.0 == json!("SSH 连接已取消")
         ));
         drop(socket);
+    }
+
+    #[tokio::test]
+    async fn shipped_permissions_limit_ssh_commands_to_the_local_main_window() {
+        let app = mock_builder()
+            .manage(SshService::default())
+            .invoke_handler(handle)
+            .build(tauri::generate_context!())
+            .unwrap();
+        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .unwrap();
+        let other = tauri::WebviewWindowBuilder::new(&app, "other", Default::default())
+            .build()
+            .unwrap();
+
+        // Denials happen before the command spawns, so no async runtime is needed.
+        for (webview, url) in [
+            (&main, tauri::Url::parse("https://example.com/").unwrap()),
+            (&other, other.url().unwrap()),
+        ] {
+            let response = timeout(Duration::from_secs(2), dispatch_connect(webview, 1, url))
+                .await
+                .expect("permission check hung")
+                .unwrap();
+            match response {
+                InvokeResponse::Err(error) => {
+                    let message = error.0.as_str().unwrap_or_default();
+                    assert!(message.contains("not allowed"), "{message}");
+                }
+                InvokeResponse::Ok(_) => {
+                    panic!("{} escaped the shipped capability", webview.label())
+                }
+            }
+        }
     }
 }

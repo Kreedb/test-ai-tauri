@@ -108,10 +108,11 @@ npm test
 npx playwright install chromium       # 首次运行浏览器测试；Linux 缺少系统库时加 --with-deps
 npm run test:browser                   # Chromium 中运行真实 Vue + xterm 组件，Web CI 也会执行
 npm run build                         # Vue 类型检查 + Vite 构建
+npm run test:preview                  # 在 /test-ai-tauri/ 路径下加载构建产物，验证 Web 预览
 cargo fmt --all -- --check
 cargo test -p ssh-core --locked        # 不需要 GUI 库；使用回环地址的临时 SSH 服务器
 cargo clippy -p ssh-core --all-targets --locked -- -D warnings
 cargo test --workspace --locked        # 需要 Linux 桌面构建依赖
 ```
 
-测试覆盖连接状态与竞态、输入顺序和分片、Web 降级、参数校验、指纹不匹配时不发送密码、显式忽略指纹连接、认证失败、PTY/shell 拒绝、原始字节传输、输出背压、持续输出下的 Ctrl+C、缩放、主动/远端关闭及重连。原生回归测试还检查持续发送数据的握手在超时后关闭套接字，以及服务重置时关闭会话、取消建立中和排队的连接。浏览器测试仅模拟原生 IPC，验证真实 xterm 的二进制鼠标输入、分片 UTF-8 输出与写入背压，以及重连时终端销毁、光标和颜色恢复。测试服务器仅绑定 `127.0.0.1` 的临时端口，不需要外部 SSH 账号。
+测试覆盖连接状态与竞态、输入顺序和分片、Web 降级、参数校验、指纹不匹配时不发送密码、显式忽略指纹连接、认证失败、PTY/shell 拒绝、原始字节传输、输出背压、持续输出下的 Ctrl+C、缩放、主动/远端关闭及重连。原生回归测试还检查持续发送数据的握手在超时后关闭套接字，以及服务重置时关闭会话、取消建立中和排队的连接；同时验证服务器主动打开的通道被拒绝、PTY 请求 IUTF8 模式、远端信号退出原因会显示，以及发布权限只允许本地 `main` 窗口调用 SSH 命令。浏览器测试仅模拟原生 IPC，验证真实 xterm 的二进制鼠标输入、分片 UTF-8 输出与写入背压，以及重连时终端销毁、光标和颜色恢复；`npm run test:preview` 则在 `/test-ai-tauri/` 前缀下加载构建产物，确认 Web 预览禁用连接且无页面错误。测试服务器仅绑定 `127.0.0.1` 的临时端口，不需要外部 SSH 账号。

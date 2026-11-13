@@ -33,7 +33,6 @@ impl<T> Drop for AbortOnDrop<T> {
 enum Control {
     Write(Vec<u8>, Reply),
     Resize(TerminalSize, Reply),
-    Disconnect,
 }
 
 struct ActiveSession {
@@ -164,12 +163,11 @@ impl SshService {
         let Some(mut session) = active.take_if(|session| session.id == id) else {
             return Ok(());
         };
-        drop(active);
-        let _ = timeout(IO_TIMEOUT, session.sender.send(Control::Disconnect)).await;
-        timeout(IO_TIMEOUT, &mut session.task)
-            .await
-            .map_err(|_| "SSH 断开超时".to_string())?
-            .map_err(|error| format!("SSH 会话任务异常：{error}"))
+        // Keep the lock until the socket guard is dropped, so a replacement
+        // session cannot connect while this one is still closing.
+        session.task.abort();
+        let _ = (&mut session.task).await;
+        Ok(())
     }
 }
 
@@ -188,7 +186,7 @@ async fn run(
     let (mut reader, writer) = channel.split();
     let mut writer_task = AbortOnDrop(tokio::spawn(write_controls(writer, controls)));
     let mut pending = early_output.pop_front();
-    let mut notify = true;
+    let mut signal = None;
     let error = loop {
         tokio::select! {
             permit = output.reserve(), if pending.is_some() => {
@@ -198,20 +196,28 @@ async fn run(
             }
             finished = &mut writer_task.0 => {
                 break match finished {
-                    Ok(Ok(())) => {
-                        notify = false;
-                        None
-                    }
                     Ok(Err(error)) => Some(error),
                     Err(_) => Some("SSH 会话任务异常".into()),
+                    // The control sender only closes when the session is dropped.
+                    Ok(Ok(())) => None,
                 };
             }
             message = reader.wait(), if pending.is_none() => match message {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
                     pending = Some(TerminalEvent::Data { data: data.to_vec() });
                 }
+                Some(ChannelMsg::ExitSignal {
+                    signal_name,
+                    core_dumped,
+                    error_message,
+                    ..
+                }) => {
+                    signal = Some(format!(
+                        "远程 shell 以信号 {signal_name:?} 退出（core dumped={core_dumped}）：{error_message}"
+                    ));
+                }
                 Some(ChannelMsg::Failure) => break Some("服务器拒绝终端请求".into()),
-                Some(ChannelMsg::Close) => break None,
+                Some(ChannelMsg::Close) => break signal,
                 None => break Some("SSH 连接意外断开".into()),
                 _ => {}
             }
@@ -223,9 +229,7 @@ async fn run(
         session.disconnect(Disconnect::ByApplication, "", "en"),
     )
     .await;
-    if notify {
-        let _ = output.send(TerminalEvent::Closed { error }).await;
-    }
+    let _ = output.send(TerminalEvent::Closed { error }).await;
 }
 
 async fn write_controls(
@@ -241,7 +245,6 @@ async fn write_controls(
                 timeout(IO_TIMEOUT, writer.window_change(size.cols, size.rows, 0, 0)).await,
                 reply,
             ),
-            Control::Disconnect => return Ok(()),
         };
         let result = result
             .map_err(|_| "SSH 写入超时".to_string())
