@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { defaultSettings, parseSettings, serializeSettings, validateSettings } from './settings';
+import { defaultSettings, palettes, parseSettings, serializeSettings, terminalColors, validateSettings } from './settings';
 import { loadSettings, saveSettings } from '../platform/settingsStorage';
+
+function luminance(hex: string) {
+  const [r, g, b] = [1, 3, 5]
+    .map((offset) => parseInt(hex.slice(offset, offset + 2), 16) / 255)
+    .map((channel) => (channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
 
 describe('settings boundary and storage', () => {
   it('round-trips custom settings and fills omitted fields from defaults', () => {
@@ -73,5 +80,19 @@ describe('settings boundary and storage', () => {
     expect(() => loadSettings(storage)).toThrow();
     expect(data).toBe('{broken');
     expect(() => saveSettings(settings, { setItem: () => { throw new Error('quota exceeded'); } })).toThrow('quota exceeded');
+  });
+
+  it('gives light backgrounds an ANSI palette that stays readable', () => {
+    const paper: Record<string, string> = { ...palettes.paper };
+    const ansi = Object.fromEntries(Object.entries(paper).filter(([key]) => !['background', 'foreground', 'cursor'].includes(key)));
+    expect(Object.keys(ansi)).toHaveLength(16);
+    for (const [key, color] of Object.entries(paper)) {
+      if (key === 'background' || key === 'cursor') continue;
+      const [light, dark] = [luminance(paper.background), luminance(color)].sort((a, b) => b - a);
+      expect((light + 0.05) / (dark + 0.05), key).toBeGreaterThanOrEqual(4.5);
+    }
+    const custom = { ...defaultSettings().terminal, palette: 'custom' as const, foreground: '#111111', cursor: '#111111' };
+    expect(terminalColors({ ...custom, background: '#ffffff' })).toMatchObject(ansi);
+    expect(terminalColors({ ...custom, background: '#10151e' })).not.toHaveProperty('brightWhite');
   });
 });

@@ -37,15 +37,46 @@ export const limits = {
   inactivityTimeoutSecs: { min: 0, max: 86400, step: 1 },
 } as const;
 
-export const palettes = {
-  midnight: { background: '#10151e', foreground: '#dce4ef', cursor: '#7dd3c0' },
-  paper: { background: '#f8fafc', foreground: '#1e293b', cursor: '#0f766e' },
+// xterm's default ANSI palette is tuned for dark backgrounds, so a light surface needs its own
+// hues: the white/bright entries become dark and every color keeps at least 4.5:1 contrast.
+const lightAnsi = {
+  black: '#334155',
+  red: '#b91c1c',
+  green: '#15803d',
+  yellow: '#a16207',
+  blue: '#1d4ed8',
+  magenta: '#7e22ce',
+  cyan: '#0e7490',
+  white: '#64748b',
+  brightBlack: '#475569',
+  brightRed: '#dc2626',
+  brightGreen: '#166534',
+  brightYellow: '#854d0e',
+  brightBlue: '#2563eb',
+  brightMagenta: '#9333ea',
+  brightCyan: '#155e75',
+  brightWhite: '#1e293b',
 } as const;
 
+export const palettes = {
+  midnight: { background: '#10151e', foreground: '#dce4ef', cursor: '#7dd3c0' },
+  paper: { background: '#f8fafc', foreground: '#1e293b', cursor: '#0f766e', ...lightAnsi },
+} as const;
+
+function isLightBackground(color: string) {
+  const [r, g, b] = [1, 3, 5].map((offset) => parseInt(color.slice(offset, offset + 2), 16));
+  return (r * 299 + g * 587 + b * 114) / 1000 >= 128;
+}
+
 export function terminalColors(settings: TerminalSettings) {
-  return settings.palette === 'custom'
-    ? { background: settings.background, foreground: settings.foreground, cursor: settings.cursor }
-    : palettes[settings.palette];
+  if (settings.palette !== 'custom') return palettes[settings.palette];
+  return {
+    background: settings.background,
+    foreground: settings.foreground,
+    cursor: settings.cursor,
+    // Custom backgrounds need the same ANSI adaptation as the paper preset.
+    ...(isLightBackground(settings.background) ? lightAnsi : {}),
+  };
 }
 
 export function defaultSettings(): Settings {

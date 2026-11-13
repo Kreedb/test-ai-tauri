@@ -109,6 +109,7 @@ defineExpose({ open });
           </div>
           <label for="palette">终端配色</label>
           <select id="palette" v-model="draft.terminal.palette"><option value="midnight">午夜 · 深色</option><option value="paper">纸张 · 浅色</option><option value="custom">自定义</option></select>
+          <p class="field-help">浅色背景会使用加深的 16 色 ANSI 调色板，保证提示符、目录与 diff 等彩色输出可读。</p>
           <div v-if="draft.terminal.palette === 'custom'" class="color-grid">
             <div><label for="terminal-background">终端背景色</label><input id="terminal-background" v-model="draft.terminal.background" type="color" /></div>
             <div><label for="terminal-foreground">终端文字色</label><input id="terminal-foreground" v-model="draft.terminal.foreground" type="color" /></div>
