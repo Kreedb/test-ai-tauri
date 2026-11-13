@@ -9,13 +9,13 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: build-${{ github.ref }}
-  cancel-in-progress: true
-
 jobs:
   web:
     runs-on: ubuntu-24.04
+    # Cancel superseded builds without interrupting an in-flight Pages deployment.
+    concurrency:
+      group: build-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -24,7 +24,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npx playwright install --with-deps chromium
+      # Both browser checks run headless, so only the headless shell is installed.
+      - run: npx playwright install --with-deps --only-shell chromium
       - run: npm run test:browser
       - run: npm run build
       - run: npm run test:preview
@@ -33,9 +34,34 @@ jobs:
           name: web
           path: dist/
           if-no-files-found: error
+      - uses: actions/upload-pages-artifact@v5
+        if: github.ref == 'refs/heads/main'
+        with:
+          path: dist
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: web
+    runs-on: ubuntu-24.04
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v5
 
   linux:
     runs-on: ubuntu-24.04
+    concurrency:
+      group: linux-${{ github.ref }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -64,6 +90,9 @@ jobs:
   windows:
     name: Windows MSVC via cargo-xwin (Linux host)
     runs-on: ubuntu-24.04
+    concurrency:
+      group: windows-${{ github.ref }}
+      cancel-in-progress: true
     env:
       XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
       XWIN_ARCH: x86_64
@@ -88,8 +117,10 @@ jobs:
       - name: Install cross-compilation prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang lld llvm
-          cargo install --locked --version "$CARGO_XWIN_VERSION" cargo-xwin
+          sudo apt-get install -y --no-install-recommends clang lld llvm python3-venv
+          python3 -m venv "$RUNNER_TEMP/cargo-xwin"
+          "$RUNNER_TEMP/cargo-xwin/bin/pip" install --no-cache-dir "cargo-xwin==$CARGO_XWIN_VERSION"
+          echo "$RUNNER_TEMP/cargo-xwin/bin" >> "$GITHUB_PATH"
       - run: npm ci
       - run: npm run desktop:windows
       - uses: actions/upload-artifact@v7

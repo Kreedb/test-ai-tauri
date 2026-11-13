@@ -176,7 +176,7 @@ async fn run(
         session,
         channel,
         mut early_output,
-        socket: _socket,
+        socket,
     }: ConnectedSsh,
     controls: mpsc::Receiver<Control>,
     output: mpsc::Sender<TerminalEvent>,
@@ -229,6 +229,8 @@ async fn run(
         session.disconnect(Disconnect::ByApplication, "", "en"),
     )
     .await;
+    // A full output queue must not keep a failed connection's socket open.
+    drop(socket);
     let _ = output.send(TerminalEvent::Closed { error }).await;
 }
 

@@ -62,6 +62,8 @@ onBeforeUnmount(() => { void session.disconnect(); });
       当前是 GitHub Pages 可部署的静态预览。浏览器不支持直连 SSH，请下载 Linux 或 Windows 桌面版。
     </p>
 
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
+
     <section class="workspace" aria-label="SSH 工作区">
       <form class="connection" @submit.prevent="connect">
         <h2>新建连接</h2>
@@ -100,7 +102,6 @@ onBeforeUnmount(() => { void session.disconnect(); });
         <TerminalPane :key="terminalKey" ref="terminal" :show-welcome="terminalKey === 0" @input="session.write" @resize="session.resize" />
       </section>
     </section>
-    <p v-if="error" class="error" role="alert">{{ error }}</p>
     <footer>单会话 · 密码认证 · xterm-256color PTY · 自动适配终端尺寸</footer>
   </main>
 </template>
