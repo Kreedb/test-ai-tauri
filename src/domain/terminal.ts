@@ -1,3 +1,11 @@
+export interface ConnectionOptions {
+  term: string;
+  connectTimeoutSecs: number;
+  keepaliveIntervalSecs: number;
+  keepaliveMax: number;
+  inactivityTimeoutSecs: number;
+}
+
 export interface ConnectionRequest {
   host: string;
   port: number;
@@ -5,6 +13,7 @@ export interface ConnectionRequest {
   password: string;
   hostKeySha256: string;
   ignoreHostKey: boolean;
+  options?: ConnectionOptions;
 }
 
 export interface TerminalSize {

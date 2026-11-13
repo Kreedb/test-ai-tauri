@@ -1,6 +1,6 @@
 # Tauri SSH Terminal
 
-一个最小但有明确分层的 **Tauri 2 + Vue 3 + TypeScript + Vite** SSH 终端模板。
+一个可定制、分层清晰的 **Tauri 2 + Vue 3 + TypeScript + Vite** SSH 终端模板。包含桌面 SSH、可部署的 Web 预览与版本化设置，可作为后续项目的起点。
 
 | 平台 | 产物 | 功能 |
 | --- | --- | --- |
@@ -67,6 +67,28 @@ Windows 10/11 需要预先安装 [WebView2 Evergreen Runtime](https://developer.
 
 首版仅支持一个会话与密码认证，不含 SSH agent、私钥认证、keyboard-interactive/二次认证、会话持久化或 SFTP；服务器必须允许密码认证和交互式 shell。SSH 数据在 Rust 与 xterm 之间保持原始字节，避免跨网络分片破坏中文或 ANSI 序列。
 
+## 工作区定制
+
+点击右上角 **工作区设置**。先编辑草稿，再点击“应用设置”；取消或按 Escape 不会修改当前配置。Web 预览同样支持设置操作。
+
+| 分组 | 可调整参数 | 默认值 / 范围 |
+| --- | --- | --- |
+| 外观 | 深色、浅色、跟随系统；强调色；舒适/紧凑密度；侧栏宽度 | 深色、薄荷绿、舒适；320 px（280–420，步长 10） |
+| 终端字体 | 本机字体族、字号、行高 | 等宽字体；14 px（10–28）；1（1–2，步长 0.1） |
+| 终端行为 | 回滚行数、光标样式/闪烁、屏幕阅读器支持 | 3000（0–50000）；方块、闪烁；阅读器开启 |
+| 终端配色 | 午夜、纸张、自定义背景/文字/光标颜色 | 午夜；自定义颜色使用 `#RRGGBB` |
+| SSH | TERM、建立连接总超时 | `xterm-256color`；15 秒（1–120） |
+| SSH 保活 | 间隔、最大未响应次数 | 30 秒（0–300）；3 次（1–10） |
+| SSH 无数据超时 | 协议无活动的超时时间 | 120 秒（0–86400） |
+
+外观和终端设置应用后生效，并重新测量终端、同步远端 PTY 尺寸，不会重建当前会话；降低回滚行数会丢弃超限历史输出。SSH 设置仅用于下次连接。保活间隔与无数据超时设为 `0` 可分别禁用；协议活动包括保活回复，无数据超时不是“用户多久没有敲键盘”。TERM 应与远端支持的终端类型匹配，默认适合 xterm。
+
+设置保存到当前 Web origin / 桌面 WebView 的 `localStorage`（键名 `tauri-ssh.settings.v1`），不跨设备自动同步。存储不可用时本次修改仍生效，并提示导出配置；损坏或不支持版本的配置会回退默认值，直到显式应用设置才覆盖原数据。
+
+**导出配置**下载当前草稿的 JSON；**导入配置**通过校验后载入草稿，仍需点击应用。**恢复默认**同样先作用于草稿。文件上限 32 KB，包含 `version: 1`；缺省分组/字段补默认值，非法值拒绝，未知字段丢弃。配置只包含外观、终端和 SSH 参数，连接地址、用户名、密码、主机指纹与“忽略主机指纹”开关均不保存或导出。
+
+界面还提供连接面板折叠、终端聚焦和本地清屏，底栏显示实际行列数。清屏只清理本地显示/回滚，不向服务器执行命令。
+
 ## GitHub Pages 与 CI 产物
 
 在仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。合并到 `main` 后，`Build and test` 工作流的部署任务会发布静态站点，也可以手动触发。
@@ -79,11 +101,19 @@ Vite 使用相对资源路径 `base: './'`，同时适用于 `https://<owner>.gi
 
 ```text
 src/
-  App.vue                    连接表单与页面组合
-  components/TerminalPane.vue xterm 渲染、键盘与尺寸事件
-  application/               会话状态、异步输入排序、断开与错误处理
-  domain/terminal.ts         连接/事件/终端尺寸及 transport 接口
-  platform/                  Tauri IPC 适配；Web 不可用适配
+  App.vue                    工作区组合、主题应用与会话编排
+  components/
+    ConnectionForm.vue       临时连接信息、验证提示、密码提交即清空
+    SettingsPanel.vue        设置草稿、导入导出与原生模态对话框
+    TerminalPane.vue         xterm 渲染、选项更新、键盘与尺寸事件
+  application/
+    terminalSession.ts       会话状态、异步输入排序、断开与错误处理
+    settings.ts              设置加载/应用与存储失败提示
+  domain/
+    terminal.ts              连接/事件/终端尺寸及 transport 接口
+    settings.ts              配置类型、默认值、范围、校验与 JSON 格式
+  platform/                  Tauri IPC、Web 不可用适配与本地设置存储
+  style.css                  主题 token、组件布局与响应式样式
 crates/ssh-core/
   src/model.rs               IPC 边界数据与校验，不依赖 Tauri
   src/client.rs              russh 握手、主机指纹、认证、PTY/shell
@@ -101,6 +131,13 @@ src-tauri/
 
 增加业务功能时，在 `domain` 定义必要契约，`application` 管理流程，`platform` 实现平台差异；Rust 业务逻辑放进 `ssh-core`，不要把协议细节写入 Vue 或 Tauri 命令。当前不引入路由、全局状态库、DI 容器或空目录来占位。
 
+### 作为新项目模板
+
+- 调整默认体验：编辑 `src/domain/settings.ts` 的 `defaultSettings()`，主题颜色在 `src/style.css` 的 CSS 变量中集中维护。
+- 增加设置：同步更新设置类型、默认值、`validateSettings()`、设置面板和实际使用方；涉及 SSH 时同时更新 `ConnectionOptions`、Rust 校验和协议测试。Rust 独立验证 IPC 参数，不能只信任 HTML 输入约束。
+- 配置演进：当前格式为版本 1；新增可选字段可补默认值，破坏性变更应增加版本并提供明确迁移。旧 `ssh_connect` JSON 不提供 `options` 时沿用原默认行为；Rust 调用方构造 `ConnectionRequest` 时需填写 `options: ConnectionOptions::default()`。
+- 调整应用名称、标识和初始窗口尺寸：编辑 `src-tauri/tauri.conf.json`；包名/版本同时核对根目录与桌面端 Cargo 配置、`package.json` 和锁文件。权限仍在 `src-tauri/capabilities/` 中按功能显式声明。
+
 ## 验证
 
 ```sh
@@ -116,3 +153,5 @@ cargo test --workspace --locked        # 需要 Linux 桌面构建依赖
 ```
 
 测试覆盖连接状态与竞态、输入顺序和分片、Web 降级、参数校验、指纹不匹配时不发送密码、显式忽略指纹连接、认证失败、PTY/shell 拒绝、原始字节传输、输出背压、持续输出下的 Ctrl+C、缩放、主动/远端关闭及重连。原生回归测试还检查持续发送数据的握手在超时后关闭套接字，以及服务重置时关闭会话、取消建立中和排队的连接；同时验证服务器主动打开的通道被拒绝、PTY 请求 IUTF8 模式、远端信号退出原因会显示，以及发布权限只允许本地 `main` 窗口调用 SSH 命令。浏览器测试仅模拟原生 IPC，验证真实 xterm 的二进制鼠标输入、分片 UTF-8 输出与写入背压，以及重连时终端销毁、光标和颜色恢复；`npm run test:preview` 则在 `/test-ai-tauri/` 前缀下加载构建产物，确认 Web 预览禁用连接且无页面错误。测试服务器仅绑定 `127.0.0.1` 的临时端口，不需要外部 SSH 账号。
+
+设置回归覆盖格式/范围校验、敏感字段剔除、存储失败、草稿取消、导入导出、默认值恢复、重载持久化，以及真实 xterm 在线修改选项后保留输出和同步尺寸；Rust 回环测试验证自定义连接超时与 TERM 实际送达服务端。预览测试还检查浅色主题持久化和 360 px 窄屏布局。

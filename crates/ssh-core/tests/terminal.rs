@@ -11,7 +11,7 @@ use russh::{
     keys::{HashAlg, PrivateKey, ssh_key::private::Ed25519Keypair},
     server::{self, Server as _, Session},
 };
-use ssh_core::{ConnectionRequest, SshService, TerminalEvent, TerminalSize};
+use ssh_core::{ConnectionOptions, ConnectionRequest, SshService, TerminalEvent, TerminalSize};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
@@ -26,6 +26,7 @@ const SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 struct EchoServer {
     auth_attempts: Arc<AtomicUsize>,
     sizes: mpsc::UnboundedSender<(u32, u32)>,
+    terms: mpsc::UnboundedSender<String>,
     opened: mpsc::UnboundedSender<usize>,
     closed: mpsc::UnboundedSender<()>,
     reject_shell: bool,
@@ -83,7 +84,7 @@ impl server::Handler for EchoServer {
         modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        assert_eq!(term, "xterm-256color");
+        let _ = self.terms.send(term.into());
         assert_eq!(modes, [(Pty::IUTF8, 1)]);
         let _ = self.sizes.send((cols, rows));
         session.channel_success(channel)?;
@@ -170,6 +171,7 @@ struct TestServer {
     fingerprint: String,
     auth_attempts: Arc<AtomicUsize>,
     sizes: mpsc::UnboundedReceiver<(u32, u32)>,
+    terms: mpsc::UnboundedReceiver<String>,
     opened: mpsc::UnboundedReceiver<usize>,
     closed: mpsc::UnboundedReceiver<()>,
     task: JoinHandle<()>,
@@ -207,12 +209,14 @@ impl TestServer {
         let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = socket.local_addr().unwrap().port();
         let (sizes_tx, sizes) = mpsc::unbounded_channel();
+        let (terms_tx, terms) = mpsc::unbounded_channel();
         let (opened_tx, opened) = mpsc::unbounded_channel();
         let (closed_tx, closed) = mpsc::unbounded_channel();
         let auth_attempts = Arc::new(AtomicUsize::new(0));
         let mut handler = EchoServer {
             auth_attempts: auth_attempts.clone(),
             sizes: sizes_tx,
+            terms: terms_tx,
             opened: opened_tx,
             closed: closed_tx,
             reject_shell,
@@ -226,6 +230,7 @@ impl TestServer {
             fingerprint,
             auth_attempts,
             sizes,
+            terms,
             opened,
             closed,
             task,
@@ -240,6 +245,7 @@ impl TestServer {
             password: "test-only".into(),
             host_key_sha256: self.fingerprint.clone(),
             ignore_host_key: false,
+            options: ConnectionOptions::default(),
         }
     }
 }
@@ -270,6 +276,31 @@ async fn read_bytes(service: &SshService, id: u32, expected: &[u8]) {
     })
     .await
     .expect("terminal output timed out");
+}
+
+#[tokio::test]
+async fn sends_selected_terminal_type_to_the_server() {
+    let mut server = TestServer::start(false).await;
+    let service = SshService::default();
+    for term in ["xterm-256color", "vt100"] {
+        let mut request = server.request();
+        request.options.term = term.into();
+        request.options.keepalive_interval_secs = 0;
+        request.options.inactivity_timeout_secs = 0;
+        let id = service
+            .connect(request, SIZE, service.generation())
+            .await
+            .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), server.terms.recv())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(term)
+        );
+        read_bytes(&service, id, b"ready\r\n").await;
+        service.disconnect(id).await.unwrap();
+    }
 }
 
 async fn stalled_peer() -> (ConnectionRequest, oneshot::Receiver<()>, JoinHandle<()>) {
@@ -313,6 +344,7 @@ async fn stalled_peer() -> (ConnectionRequest, oneshot::Receiver<()>, JoinHandle
             password: "test-only".into(),
             host_key_sha256: format!("SHA256:{}", "A".repeat(43)),
             ignore_host_key: false,
+            options: ConnectionOptions::default(),
         },
         ready,
         task,
@@ -321,7 +353,8 @@ async fn stalled_peer() -> (ConnectionRequest, oneshot::Receiver<()>, JoinHandle
 
 #[tokio::test]
 async fn timed_out_handshake_closes_a_chatty_peer() {
-    let (request, ready, peer) = stalled_peer().await;
+    let (mut request, ready, peer) = stalled_peer().await;
+    request.options.connect_timeout_secs = 2;
     let service = Arc::new(SshService::default());
     let generation = service.generation();
     let connecting = tokio::spawn({
@@ -332,16 +365,16 @@ async fn timed_out_handshake_closes_a_chatty_peer() {
         .await
         .expect("peer never became ready")
         .unwrap();
-    // Skip the real 15 second wait; the timeout itself still fires.
+    // Skip the real wait; the configured deadline itself still fires.
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(16)).await;
+    tokio::time::advance(Duration::from_secs(3)).await;
     tokio::time::resume();
     let error = timeout(Duration::from_secs(2), connecting)
         .await
         .expect("handshake timeout did not fire")
         .unwrap()
         .unwrap_err();
-    assert_eq!(error, "SSH 连接超时（15 秒）");
+    assert_eq!(error, "SSH 连接超时（2 秒）");
     timeout(Duration::from_secs(2), peer)
         .await
         .expect("timed-out peer connection stayed open")
