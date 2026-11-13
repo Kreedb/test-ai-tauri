@@ -23,6 +23,84 @@ impl client::Handler for HostKeyVerifier {
         Ok(self.ignore
             || key.public_key().fingerprint(HashAlg::Sha256).to_string() == self.fingerprint)
     }
+
+    // Only the terminal channel this client opens is supported. Dropping each
+    // reply rejects the server's request instead of retaining its state.
+
+    async fn server_channel_open_session(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_tcpip(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: &str,
+        _: u32,
+        _: &str,
+        _: u32,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn server_channel_open_direct_streamlocal(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: &str,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: &str,
+        _: u32,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: &str,
+        _: u32,
+        _: &str,
+        _: u32,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: &str,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        _: Channel<client::Msg>,
+        _: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 pub(crate) struct SocketGuard(std::net::TcpStream);
@@ -84,7 +162,16 @@ pub(crate) async fn connect(
         .await
         .map_err(|e| e.to_string())?;
     channel
-        .request_pty(true, "xterm-256color", size.cols, size.rows, 0, 0, &[])
+        // Without IUTF8 the remote line editor erases one byte, corrupting multi-byte input.
+        .request_pty(
+            true,
+            "xterm-256color",
+            size.cols,
+            size.rows,
+            0,
+            0,
+            &[(russh::Pty::IUTF8, 1)],
+        )
         .await
         .map_err(|e| e.to_string())?;
     let mut early_output = VecDeque::new();

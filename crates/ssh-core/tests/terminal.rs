@@ -26,6 +26,7 @@ const SIZE: TerminalSize = TerminalSize { cols: 80, rows: 24 };
 struct EchoServer {
     auth_attempts: Arc<AtomicUsize>,
     sizes: mpsc::UnboundedSender<(u32, u32)>,
+    opened: mpsc::UnboundedSender<usize>,
     closed: mpsc::UnboundedSender<()>,
     reject_shell: bool,
 }
@@ -78,10 +79,11 @@ impl server::Handler for EchoServer {
         rows: u32,
         _: u32,
         _: u32,
-        _: &[(Pty, u32)],
+        modes: &[(Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         assert_eq!(term, "xterm-256color");
+        assert_eq!(modes, [(Pty::IUTF8, 1)]);
         let _ = self.sizes.send((cols, rows));
         session.channel_success(channel)?;
         Ok(())
@@ -117,6 +119,22 @@ impl server::Handler for EchoServer {
             session.exit_status_request(channel, 0)?;
             session.data(channel, b"goodbye\r\n".to_vec())?;
             session.close(channel)?;
+        } else if data == b"crash\r" {
+            session.exit_signal_request(channel, russh::Sig::SEGV, true, "segfault", "en")?;
+            session.data(channel, b"boom\r\n".to_vec())?;
+            session.close(channel)?;
+        } else if data == b"open\r" {
+            let handle = session.handle();
+            let opened = self.opened.clone();
+            tokio::spawn(async move {
+                let mut accepted = 0;
+                for _ in 0..200 {
+                    if handle.channel_open_session().await.is_ok() {
+                        accepted += 1;
+                    }
+                }
+                let _ = opened.send(accepted);
+            });
         } else if data == b"drop\r" {
             return Err(russh::Error::Disconnect);
         } else {
@@ -146,6 +164,7 @@ struct TestServer {
     fingerprint: String,
     auth_attempts: Arc<AtomicUsize>,
     sizes: mpsc::UnboundedReceiver<(u32, u32)>,
+    opened: mpsc::UnboundedReceiver<usize>,
     closed: mpsc::UnboundedReceiver<()>,
     task: JoinHandle<()>,
 }
@@ -170,11 +189,13 @@ impl TestServer {
         let socket = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = socket.local_addr().unwrap().port();
         let (sizes_tx, sizes) = mpsc::unbounded_channel();
+        let (opened_tx, opened) = mpsc::unbounded_channel();
         let (closed_tx, closed) = mpsc::unbounded_channel();
         let auth_attempts = Arc::new(AtomicUsize::new(0));
         let mut handler = EchoServer {
             auth_attempts: auth_attempts.clone(),
             sizes: sizes_tx,
+            opened: opened_tx,
             closed: closed_tx,
             reject_shell,
         };
@@ -186,6 +207,7 @@ impl TestServer {
             fingerprint,
             auth_attempts,
             sizes,
+            opened,
             closed,
             task,
         }
@@ -542,6 +564,46 @@ async fn reports_an_unexpected_connection_loss() {
             .unwrap(),
         Some(TerminalEvent::Closed { error: Some(_) })
     ));
+}
+
+#[tokio::test]
+async fn rejects_channels_opened_by_the_server() {
+    let mut server = TestServer::start(false).await;
+    let service = SshService::default();
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    service.write(id, b"open\r".to_vec()).await.unwrap();
+    assert_eq!(
+        timeout(Duration::from_secs(5), server.opened.recv())
+            .await
+            .expect("server channel opens were not answered")
+            .unwrap(),
+        0
+    );
+    // The terminal channel keeps working after the rejections.
+    service.write(id, b"ok".to_vec()).await.unwrap();
+    read_bytes(&service, id, b"ok").await;
+    service.disconnect(id).await.unwrap();
+}
+
+#[tokio::test]
+async fn reports_the_signal_that_killed_the_remote_shell() {
+    let server = TestServer::start(false).await;
+    let service = SshService::default();
+    let id = connect(&service, &server).await;
+    read_bytes(&service, id, b"ready\r\n").await;
+    service.write(id, b"crash\r".to_vec()).await.unwrap();
+    read_bytes(&service, id, b"boom\r\n").await;
+    match timeout(Duration::from_secs(5), service.read(id))
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        Some(TerminalEvent::Closed { error: Some(error) }) => {
+            assert!(error.contains("SEGV"), "unexpected close reason: {error}")
+        }
+        _ => panic!("expected the crash signal to be reported"),
+    }
 }
 
 #[tokio::test]
